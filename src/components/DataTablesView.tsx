@@ -1,11 +1,15 @@
 import React, { useState } from 'react';
-import { CustomPalette, SgeDataset } from '../types/sge';
+import { Edit3, Plus } from 'lucide-react';
+import { AppMode, CustomPalette, SgeDataset } from '../types/sge';
 import { getSwatchForStatus } from '../utils/sgeVisualConfig';
+import { ModalState } from './EntityEditModals';
 
 interface DataTablesViewProps {
   dataset: SgeDataset;
+  appMode: AppMode;
   palette: CustomPalette;
   onSelectRse: (rseId: string) => void;
+  onOpenModal: (modal: ModalState) => void;
 }
 
 type SheetTab =
@@ -25,9 +29,12 @@ type SheetTab =
 
 export const DataTablesView: React.FC<DataTablesViewProps> = ({
   dataset,
+  appMode,
   palette,
   onSelectRse,
+  onOpenModal,
 }) => {
+  const isEdit = appMode === 'edit';
   const [activeTab, setActiveTab] = useState<SheetTab>('rse');
 
   const tabs: { key: SheetTab; label: string; count: number }[] = [
@@ -74,6 +81,50 @@ export const DataTablesView: React.FC<DataTablesViewProps> = ({
 
       {/* Table Content */}
       <div className="flex-1 overflow-auto p-4">
+        {isEdit && (
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs dark:border-amber-900/60 dark:bg-amber-950/30">
+            <span className="font-medium text-amber-950 dark:text-amber-200">
+              Tabellen-Bearbeitung aktiv – Einträge direkt hinzufügen oder über Klick auf ein RSE/Element bearbeiten:
+            </span>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => onOpenModal({ kind: 'add-rse' })}
+                className="inline-flex items-center gap-1 rounded bg-blue-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-blue-700"
+              >
+                <Plus className="h-3 w-3" /> RSE
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenModal({ kind: 'upsert-kombi' })}
+                className="inline-flex items-center gap-1 rounded bg-teal-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-teal-700"
+              >
+                <Plus className="h-3 w-3" /> KOMBI
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenModal({ kind: 'upsert-arrow' })}
+                className="inline-flex items-center gap-1 rounded bg-violet-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-violet-700"
+              >
+                <Plus className="h-3 w-3" /> Pfeil
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenModal({ kind: 'upsert-cause' })}
+                className="inline-flex items-center gap-1 rounded bg-amber-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-amber-700"
+              >
+                <Plus className="h-3 w-3" /> Ursache
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenModal({ kind: 'upsert-learning' })}
+                className="inline-flex items-center gap-1 rounded bg-indigo-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-indigo-700"
+              >
+                <Plus className="h-3 w-3" /> Learning
+              </button>
+            </div>
+          </div>
+        )}
         <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
           {activeTab === 'dashboard' && (
             <table className="w-full border-collapse text-left text-xs">
@@ -137,7 +188,21 @@ export const DataTablesView: React.FC<DataTablesViewProps> = ({
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {dataset.versions.map((v) => (
                   <tr key={v.versionKey} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
-                    <td className="px-3 py-2 font-mono font-bold">{v.sortOrder}</td>
+                    <td className="px-3 py-2 font-mono font-bold whitespace-nowrap">
+                      <div className="flex items-center gap-1">
+                        <span>{v.sortOrder}</span>
+                        {isEdit && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenModal({ kind: 'edit-version', version: v })}
+                            className="rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-800"
+                            title="Version bearbeiten"
+                          >
+                            <Edit3 className="h-3 w-3" />
+                          </button>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-3 py-2 font-mono">{v.versionKey}</td>
                     <td className="px-3 py-2 font-semibold whitespace-nowrap">{v.phaseName}</td>
                     <td className="px-3 py-2 whitespace-nowrap">
@@ -178,15 +243,27 @@ export const DataTablesView: React.FC<DataTablesViewProps> = ({
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {dataset.rseList.map((r) => (
                   <tr key={r.rseId} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
-                    <td className="px-3 py-2 font-mono font-bold whitespace-nowrap">
-                      <button
-                        type="button"
-                        onClick={() => onSelectRse(r.rseId)}
-                        className="text-blue-700 hover:underline dark:text-blue-400"
-                      >
-                        {r.rseId}
-                      </button>
-                    </td>
+                      <td className="px-3 py-2 font-mono font-bold whitespace-nowrap">
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => onSelectRse(r.rseId)}
+                            className="text-blue-700 hover:underline dark:text-blue-400"
+                          >
+                            {r.rseId}
+                          </button>
+                          {isEdit && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenModal({ kind: 'edit-rse', rse: r })}
+                              className="rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-800"
+                              title="RSE bearbeiten"
+                            >
+                              <Edit3 className="h-3 w-3" />
+                            </button>
+                          )}
+                        </div>
+                      </td>
                     <td className="px-3 py-2 font-mono text-[11px] whitespace-nowrap">{r.spur}</td>
                     <td className="min-w-[180px] px-3 py-2 font-semibold">{r.name}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{r.origin}</td>
@@ -362,7 +439,18 @@ export const DataTablesView: React.FC<DataTablesViewProps> = ({
                 {dataset.kombis.map((k) => (
                   <tr key={k.kombiId} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
                     <td className="px-3 py-2 font-mono font-bold text-teal-800 dark:text-teal-300 whitespace-nowrap">
-                      {k.kombiId}
+                      <div className="flex items-center gap-1">
+                        <span>{k.kombiId}</span>
+                        {isEdit && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenModal({ kind: 'upsert-kombi', existing: k })}
+                            className="rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-800"
+                          >
+                            <Edit3 className="h-3 w-3" />
+                          </button>
+                        )}
+                      </div>
                     </td>
                     <td className="max-w-[220px] px-3 py-2 font-semibold">{k.partName}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{k.integratedFromPhase}</td>
@@ -505,7 +593,20 @@ export const DataTablesView: React.FC<DataTablesViewProps> = ({
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {dataset.causes.map((c) => (
                   <tr key={c.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
-                    <td className="px-3 py-2 font-mono font-bold">{c.id}</td>
+                    <td className="px-3 py-2 font-mono font-bold whitespace-nowrap">
+                      <div className="flex items-center gap-1">
+                        <span>{c.id}</span>
+                        {isEdit && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenModal({ kind: 'upsert-cause', existing: c })}
+                            className="rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-800"
+                          >
+                            <Edit3 className="h-3 w-3" />
+                          </button>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-3 py-2 whitespace-nowrap">{c.category}</td>
                     <td className="px-3 py-2 font-mono whitespace-nowrap">
                       {c.affectedStepId || '—'} → {c.triggeredStepId || '—'}
@@ -538,7 +639,20 @@ export const DataTablesView: React.FC<DataTablesViewProps> = ({
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {dataset.arrows.map((a) => (
                   <tr key={a.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
-                    <td className="px-3 py-2 font-mono font-bold">{a.id}</td>
+                    <td className="px-3 py-2 font-mono font-bold whitespace-nowrap">
+                      <div className="flex items-center gap-1">
+                        <span>{a.id}</span>
+                        {isEdit && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenModal({ kind: 'upsert-arrow', existing: a })}
+                            className="rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-800"
+                          >
+                            <Edit3 className="h-3 w-3" />
+                          </button>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-3 py-2 font-mono whitespace-nowrap">
                       {a.from} → {a.to}
                     </td>
@@ -568,8 +682,19 @@ export const DataTablesView: React.FC<DataTablesViewProps> = ({
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {dataset.learnings.map((l) => (
                   <tr key={l.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
-                    <td className="px-3 py-2 font-mono font-bold text-indigo-700 dark:text-indigo-300">
-                      {l.id}
+                    <td className="px-3 py-2 font-mono font-bold text-indigo-700 dark:text-indigo-300 whitespace-nowrap">
+                      <div className="flex items-center gap-1">
+                        <span>{l.id}</span>
+                        {isEdit && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenModal({ kind: 'upsert-learning', existing: l })}
+                            className="rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-800"
+                          >
+                            <Edit3 className="h-3 w-3" />
+                          </button>
+                        )}
+                      </div>
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">{l.topic}</td>
                     <td className="max-w-[200px] px-3 py-2 font-semibold">{l.title}</td>

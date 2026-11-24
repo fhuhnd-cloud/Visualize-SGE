@@ -1,16 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Camera, ImagePlus, Trash2, ZoomIn } from 'lucide-react';
-import { MediaAttachment } from '../types/sge';
+import { AppMode, MediaAttachment } from '../types/sge';
 import { LightboxPayload } from './LightboxModal';
 
 interface MediaDropzoneProps {
-  /** Stable lookup key (e.g. "media/RH_01.png" or "event:EV001") */
   refKey: string;
-  /** Displayed Excel Medien_Ref path if present */
   mediaRefLabel?: string;
-  /** Short title for Lightbox */
   title: string;
   attachment?: MediaAttachment;
+  appMode?: AppMode;
   compact?: boolean;
   onUploadFile: (refKey: string, file: File) => void;
   onUpdateCaption: (refKey: string, caption: string) => void;
@@ -23,6 +21,7 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
   mediaRefLabel,
   title,
   attachment,
+  appMode = 'edit',
   compact = false,
   onUploadFile,
   onUpdateCaption,
@@ -38,7 +37,6 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
     setCaptionDraft(attachment?.caption ?? '');
   }, [attachment?.caption]);
 
-  // Check if a static file already exists under public/media/... when no local IndexedDB upload overrides it
   const publicUrl =
     !attachment && mediaRefLabel && mediaRefLabel.startsWith('media/')
       ? `/${mediaRefLabel}`
@@ -64,26 +62,33 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
   const handleFiles = (files: FileList | null) => {
     if (!files || files.length === 0) return;
     const file = files[0];
-    if (!file.type.match(/^image\/(png|jpeg|jpg|webp)$/i)) {
-      return;
-    }
+    if (!file.type.match(/^image\/(png|jpeg|jpg|webp)$/i)) return;
     onUploadFile(refKey, file);
   };
 
   const activeSrc = attachment?.dataUrl || (publicImageOk && publicUrl ? publicUrl : null);
+  const isEdit = appMode === 'edit';
+
+  // In Presentation Mode, hide empty dropzones completely for a calm, clean layout
+  if (!isEdit && !activeSrc) {
+    return null;
+  }
 
   return (
     <div
       onDragOver={(e) => {
+        if (!isEdit) return;
         e.preventDefault();
         e.stopPropagation();
         setIsDragging(true);
       }}
       onDragLeave={(e) => {
+        if (!isEdit) return;
         e.stopPropagation();
         setIsDragging(false);
       }}
       onDrop={(e) => {
+        if (!isEdit) return;
         e.preventDefault();
         e.stopPropagation();
         setIsDragging(false);
@@ -97,16 +102,18 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
             : 'border-dashed border-slate-300 bg-slate-50/70 hover:border-blue-400 dark:border-slate-700 dark:bg-slate-900/40 dark:hover:border-blue-500'
       }`}
     >
-      <input
-        ref={inputRef}
-        type="file"
-        accept="image/png,image/jpeg,image/webp"
-        className="hidden"
-        onChange={(e) => {
-          handleFiles(e.target.files);
-          e.target.value = '';
-        }}
-      />
+      {isEdit && (
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          className="hidden"
+          onChange={(e) => {
+            handleFiles(e.target.files);
+            e.target.value = '';
+          }}
+        />
+      )}
 
       {activeSrc ? (
         <div className={compact ? 'p-2' : 'p-2.5'}>
@@ -142,18 +149,24 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
               >
                 <ZoomIn className="h-3.5 w-3.5" />
               </button>
-              <button
-                type="button"
-                onClick={() => inputRef.current?.click()}
-                title="Foto ersetzen"
-                className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-slate-900/80 text-white hover:bg-slate-900"
-              >
-                <Camera className="h-3.5 w-3.5" />
-              </button>
-              {attachment && (
+              {isEdit && (
                 <button
                   type="button"
-                  onClick={() => onDelete(refKey)}
+                  onClick={() => inputRef.current?.click()}
+                  title="Foto ersetzen"
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-slate-900/80 text-white hover:bg-slate-900"
+                >
+                  <Camera className="h-3.5 w-3.5" />
+                </button>
+              )}
+              {isEdit && attachment && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (window.confirm('Foto wirklich entfernen?')) {
+                      onDelete(refKey);
+                    }
+                  }}
                   title="Foto entfernen"
                   className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-red-600/90 text-white hover:bg-red-700"
                 >
@@ -163,8 +176,8 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
             </div>
           </div>
 
-          <div className="mt-2 flex flex-col gap-1.5">
-            {attachment && (
+          <div className="mt-1.5 flex flex-col gap-1">
+            {isEdit && attachment ? (
               <input
                 type="text"
                 value={captionDraft}
@@ -175,13 +188,17 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
                   }
                 }}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    (e.target as HTMLInputElement).blur();
-                  }
+                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
                 }}
                 placeholder="Bildunterschrift hinzufügen..."
                 className="w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-800 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
               />
+            ) : (
+              attachment?.caption && (
+                <div className="text-[11px] font-medium text-slate-700 dark:text-slate-300">
+                  {attachment.caption}
+                </div>
+              )
             )}
             <div className="flex items-center justify-between gap-2 text-[10px] text-slate-500 dark:text-slate-400">
               <span className="truncate font-mono" title={mediaRefLabel || attachment?.fileName}>
@@ -208,7 +225,7 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
           </div>
           <div className="min-w-0 flex-1">
             <div className="text-[11px] font-medium text-slate-700 dark:text-slate-200">
-              Foto hier ablegen oder auswählen
+              Foto hier ablegen oder hochladen
             </div>
             <div className="truncate font-mono text-[10px] text-slate-500 dark:text-slate-400">
               {mediaRefLabel || 'PNG, JPG, WebP'}

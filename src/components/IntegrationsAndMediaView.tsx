@@ -7,20 +7,24 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import {
+  AppMode,
   CustomPalette,
   MediaAttachment,
   MicroIterationEditPatch,
   SgeDataset,
 } from '../types/sge';
+import { ModalState } from './EntityEditModals';
 import { LightboxPayload } from './LightboxModal';
 import { MediaDropzone } from './MediaDropzone';
 
 interface IntegrationsAndMediaViewProps {
   dataset: SgeDataset;
+  appMode: AppMode;
   palette: CustomPalette;
   mediaMap: Record<string, MediaAttachment>;
   onSelectRse: (rseId: string) => void;
   onEditMicroIteration: (microId: string, patch: MicroIterationEditPatch) => void;
+  onOpenModal: (modal: ModalState) => void;
   onUploadMedia: (refKey: string, file: File) => void;
   onUpdateMediaCaption: (refKey: string, caption: string) => void;
   onDeleteMedia: (refKey: string) => void;
@@ -31,15 +35,18 @@ type MediaSlotFilter = 'placeholders' | 'kombi' | 'events' | 'all_micro' | 'uplo
 
 export const IntegrationsAndMediaView: React.FC<IntegrationsAndMediaViewProps> = ({
   dataset,
+  appMode,
   palette,
   mediaMap,
   onSelectRse,
   onEditMicroIteration,
+  onOpenModal,
   onUploadMedia,
   onUpdateMediaCaption,
   onDeleteMedia,
   onOpenLightbox,
 }) => {
+  const isEdit = appMode === 'edit';
   const [slotFilter, setSlotFilter] = useState<MediaSlotFilter>('placeholders');
   const [boxFilter, setBoxFilter] = useState<string>('ALL');
   const [editingMicroId, setEditingMicroId] = useState<string | null>(null);
@@ -160,6 +167,7 @@ export const IntegrationsAndMediaView: React.FC<IntegrationsAndMediaViewProps> =
                     mediaRefLabel={kombi.mediaRef}
                     title={`${kombi.kombiId}: ${kombi.partName}`}
                     attachment={mediaMap[refKey] ?? mediaMap[`kombi:${kombi.kombiId}`]}
+                    appMode={appMode}
                     onUploadFile={onUploadMedia}
                     onUpdateCaption={onUpdateMediaCaption}
                     onDelete={onDeleteMedia}
@@ -275,7 +283,7 @@ export const IntegrationsAndMediaView: React.FC<IntegrationsAndMediaViewProps> =
                         >
                           {m.rseId}
                         </button>
-                        {!isEditing && (
+                        {isEdit && !isEditing && (
                           <button
                             type="button"
                             onClick={() => {
@@ -349,6 +357,7 @@ export const IntegrationsAndMediaView: React.FC<IntegrationsAndMediaViewProps> =
                       mediaRefLabel={m.mediaRef}
                       title={`${m.subVersionId} – ${m.rseId} (${m.detailBox})`}
                       attachment={mediaMap[refKey] ?? mediaMap[`micro:${m.id}`]}
+                      appMode={appMode}
                       compact
                       onUploadFile={onUploadMedia}
                       onUpdateCaption={onUpdateMediaCaption}
@@ -391,6 +400,7 @@ export const IntegrationsAndMediaView: React.FC<IntegrationsAndMediaViewProps> =
                       mediaRefLabel={ev.mediaRef}
                       title={`${ev.eventId} (${ev.rseId} · ${ev.version})`}
                       attachment={mediaMap[refKey] ?? mediaMap[`event:${ev.eventId}`]}
+                      appMode={appMode}
                       compact
                       onUploadFile={onUploadMedia}
                       onUpdateCaption={onUpdateMediaCaption}
@@ -426,6 +436,7 @@ export const IntegrationsAndMediaView: React.FC<IntegrationsAndMediaViewProps> =
                     mediaRefLabel={att.refKey}
                     title={att.caption || att.fileName}
                     attachment={att}
+                    appMode={appMode}
                     compact
                     onUploadFile={onUploadMedia}
                     onUpdateCaption={onUpdateMediaCaption}
