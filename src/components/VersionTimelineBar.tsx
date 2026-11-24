@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
+  Edit3,
   Flag,
   Info,
   Layers,
@@ -12,6 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import {
+  AppMode,
   ColorMode,
   CustomPalette,
   PhaseVersionConfig,
@@ -19,11 +21,14 @@ import {
 } from '../types/sge';
 import { VersionKpiSnapshot } from '../utils/sgeAnalytics';
 import { DEFAULT_SGE_PALETTE, SGE_LEGEND_ITEMS } from '../utils/sgeVisualConfig';
+import { ModalState } from './EntityEditModals';
 
 interface VersionTimelineBarProps {
   versions: PhaseVersionConfig[];
   selectedVersionIndex: number;
   onSelectVersionIndex: (index: number) => void;
+  appMode?: AppMode;
+  onOpenModal?: (modal: ModalState) => void;
   kpi: VersionKpiSnapshot | null;
   activeColorFilters: StatusColorGroup[];
   onToggleColorFilter: (group: StatusColorGroup) => void;
@@ -40,6 +45,8 @@ export const VersionTimelineBar: React.FC<VersionTimelineBarProps> = ({
   versions,
   selectedVersionIndex,
   onSelectVersionIndex,
+  appMode = 'presentation',
+  onOpenModal,
   kpi,
   activeColorFilters,
   onToggleColorFilter,
@@ -51,6 +58,7 @@ export const VersionTimelineBar: React.FC<VersionTimelineBarProps> = ({
   searchQuery,
   onSearchChange,
 }) => {
+  const isEdit = appMode === 'edit';
   const [infoVersionKey, setInfoVersionKey] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const paletteRef = useRef<HTMLDivElement>(null);
@@ -145,6 +153,17 @@ export const VersionTimelineBar: React.FC<VersionTimelineBarProps> = ({
                   <Info className="h-3 w-3" />
                   <span>Systemstand</span>
                 </button>
+                {isEdit && onOpenModal && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenModal({ kind: 'edit-version', version: currentVersion })}
+                    title="Aktuelle Version / Meilenstein bearbeiten"
+                    className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-900 hover:bg-amber-100"
+                  >
+                    <Edit3 className="h-3 w-3" />
+                    <span>Version</span>
+                  </button>
+                )}
               </div>
             )}
           </div>

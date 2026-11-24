@@ -336,14 +336,14 @@ export const EDGE_STYLES: Record<EdgeCategory, EdgeStyleConfig> = {
       'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800/80',
   },
   crossLane: {
-    label: 'Spurübergreifende Wirkbeziehung',
-    shortLabel: 'Wirkbeziehung',
-    strokeLight: '#0D9488',
-    strokeDark: '#2DD4BF',
+    label: 'Spurübergreifende Wirkbeziehung (Löst Problem in anderer Spur)',
+    shortLabel: 'Spurübergreifend',
+    strokeLight: '#D97706',
+    strokeDark: '#FBBF24',
     strokeWidth: 2.6,
     dashArray: '2.5 4.5',
     badgeClass:
-      'bg-teal-50 text-teal-800 border-teal-200 dark:bg-teal-950/60 dark:text-teal-300 dark:border-teal-800/80',
+      'bg-amber-50 text-amber-800 border-amber-300 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-800/80',
   },
   milestoneTest: {
     label: 'Meilenstein-Erprobung (Praxistest)',

@@ -12,6 +12,14 @@ export type StatusColorGroup = 'BASE' | 'CV' | 'NEW' | 'EC' | 'UD' | 'REM' | 'KO
 
 export type ColorMode = 'planning' | 'variation' | 'lifecycle';
 
+/** Global application mode: clean presentation vs full editing */
+export type AppMode = 'presentation' | 'edit';
+
+/** Progressive disclosure depth (1=Compact, 2=Standard, 3=Deep Dive) */
+export type DetailLevel = 1 | 2 | 3;
+
+export type WorkspaceView = 'board' | 'swimlane2d' | 'matrix' | 'media' | 'tables';
+
 export interface PaletteSwatch {
   bg: string;
   border: string;
@@ -42,7 +50,7 @@ export interface PhaseVersionConfig {
   versionKey: string;           // Version_Key (v0.0 .. v2.2)
   sortOrder: number;            // Sortier_Nr (1 .. 7)
   phaseName: string;            // Phasen_Name (e.g., "v1.1 Entenrennen")
-  milestoneBadge: string;       // Meilenstein_Badge (e.g., "M1: Entenrennen", "-")
+  milestoneBadge: string;       // Meilenstein_Badge (e.g., "M1: Entenrennen", "")
   isMilestone: boolean;         // true for M1, M2, M3
   systemStateSummary: string;   // Technischer Systemstand & Einordnung
   rowIndex: number;
@@ -183,6 +191,11 @@ export interface ConnectionArrow {
   id: string;                     // Pfeil_ID (P_01..P_50)
   from: string;                   // Von_Schritt_ID
   to: string;                     // Nach_Schritt_ID
+  /** Optional direct 2D-Swimlane anchors for arrows added directly between RSE nodes */
+  fromRseId?: string;
+  fromVersionKey?: string;
+  toRseId?: string;
+  toVersionKey?: string;
   arrowType: string;              // Pfeil_Typ
   category: EdgeCategory;
   causeIdRaw: string;             // Begruendung_Ursache_ID
@@ -301,7 +314,7 @@ export interface SgeDataset {
 
 /** Locally persisted media attachment (stored in IndexedDB) */
 export interface MediaAttachment {
-  refKey: string;         // Normalized Medien_Ref (e.g. "media/RH_01.png" or "event:EV001")
+  refKey: string;         // Normalized Medien_Ref (e.g. "media/RH_01.png", "rse:R1.1", "event:EV001")
   fileName: string;
   mimeType: string;
   dataUrl: string;
@@ -331,10 +344,8 @@ export interface KombiEditPatch {
 }
 
 export interface ProjectEditsOverlay {
-  events: Record<string, EventEditPatch>;           // keyed by Event_ID
-  microIterations: Record<string, MicroIterationEditPatch>; // keyed by MicroIteration.id
-  kombis: Record<string, KombiEditPatch>;           // keyed by Kombi_ID
+  events: Record<string, EventEditPatch>;
+  microIterations: Record<string, MicroIterationEditPatch>;
+  kombis: Record<string, KombiEditPatch>;
   updatedAt: string;
 }
-
-export type WorkspaceView = 'swimlane' | 'matrix' | 'media' | 'causal' | 'tables';

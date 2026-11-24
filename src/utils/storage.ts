@@ -8,10 +8,11 @@ import { buildUpdatedWorkbookBytes } from './excelParser';
 import { DEFAULT_SGE_PALETTE } from './sgeVisualConfig';
 
 const DB_NAME = 'duckomat_sge_v14_db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const MEDIA_STORE = 'media_attachments';
+const STATE_STORE = 'dataset_state';
+const ACTIVE_DATASET_KEY = 'active_working_dataset';
 
-const EDITS_STORAGE_KEY = 'duckomat_sge_v14_edits';
 const PALETTE_STORAGE_KEY = 'duckomat_sge_v14_palette';
 
 export function createEmptyEdits(): ProjectEditsOverlay {
@@ -21,30 +22,6 @@ export function createEmptyEdits(): ProjectEditsOverlay {
     kombis: {},
     updatedAt: new Date().toISOString(),
   };
-}
-
-export function loadEditsFromLocalStorage(): ProjectEditsOverlay {
-  try {
-    const raw = localStorage.getItem(EDITS_STORAGE_KEY);
-    if (!raw) return createEmptyEdits();
-    const parsed = JSON.parse(raw) as Partial<ProjectEditsOverlay>;
-    return {
-      events: parsed.events ?? {},
-      microIterations: parsed.microIterations ?? {},
-      kombis: parsed.kombis ?? {},
-      updatedAt: parsed.updatedAt ?? new Date().toISOString(),
-    };
-  } catch {
-    return createEmptyEdits();
-  }
-}
-
-export function saveEditsToLocalStorage(edits: ProjectEditsOverlay): void {
-  try {
-    localStorage.setItem(EDITS_STORAGE_KEY, JSON.stringify(edits));
-  } catch {
-    // Ignore storage quota errors gracefully
-  }
 }
 
 export function loadPaletteFromLocalStorage(): CustomPalette {
@@ -74,7 +51,7 @@ export function savePaletteToLocalStorage(palette: CustomPalette): void {
   }
 }
 
-function openMediaDb(): Promise<IDBDatabase> {
+function openAppDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
@@ -82,19 +59,78 @@ function openMediaDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(MEDIA_STORE)) {
         db.createObjectStore(MEDIA_STORE, { keyPath: 'refKey' });
       }
+      if (!db.objectStoreNames.contains(STATE_STORE)) {
+        db.createObjectStore(STATE_STORE, { keyPath: 'id' });
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
 
+export interface PersistedDatasetRecord {
+  id: string;
+  dataset: SgeDataset;
+  savedAt: string;
+  changeCount: number;
+}
+
+export async function loadPersistedDatasetFromIndexedDb(): Promise<PersistedDatasetRecord | null> {
+  try {
+    const db = await openAppDb();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STATE_STORE, 'readonly');
+      const req = tx.objectStore(STATE_STORE).get(ACTIVE_DATASET_KEY);
+      req.onsuccess = () => resolve((req.result as PersistedDatasetRecord) ?? null);
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    return null;
+  }
+}
+
+export async function savePersistedDatasetToIndexedDb(
+  dataset: SgeDataset,
+  changeCount: number
+): Promise<void> {
+  try {
+    const db = await openAppDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STATE_STORE, 'readwrite');
+      tx.objectStore(STATE_STORE).put({
+        id: ACTIVE_DATASET_KEY,
+        dataset,
+        savedAt: new Date().toISOString(),
+        changeCount,
+      } satisfies PersistedDatasetRecord);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // Ignore IndexedDB quota/private-mode errors gracefully
+  }
+}
+
+export async function clearPersistedDatasetInIndexedDb(): Promise<void> {
+  try {
+    const db = await openAppDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STATE_STORE, 'readwrite');
+      tx.objectStore(STATE_STORE).delete(ACTIVE_DATASET_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // Ignore
+  }
+}
+
 export async function loadAllMediaFromIndexedDb(): Promise<Record<string, MediaAttachment>> {
   try {
-    const db = await openMediaDb();
+    const db = await openAppDb();
     return await new Promise((resolve, reject) => {
       const tx = db.transaction(MEDIA_STORE, 'readonly');
-      const store = tx.objectStore(MEDIA_STORE);
-      const req = store.getAll();
+      const req = tx.objectStore(MEDIA_STORE).getAll();
       req.onsuccess = () => {
         const result: Record<string, MediaAttachment> = {};
         for (const item of (req.result as MediaAttachment[]) ?? []) {
@@ -110,7 +146,7 @@ export async function loadAllMediaFromIndexedDb(): Promise<Record<string, MediaA
 }
 
 export async function saveMediaToIndexedDb(item: MediaAttachment): Promise<void> {
-  const db = await openMediaDb();
+  const db = await openAppDb();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(MEDIA_STORE, 'readwrite');
     tx.objectStore(MEDIA_STORE).put(item);
@@ -120,7 +156,7 @@ export async function saveMediaToIndexedDb(item: MediaAttachment): Promise<void>
 }
 
 export async function deleteMediaFromIndexedDb(refKey: string): Promise<void> {
-  const db = await openMediaDb();
+  const db = await openAppDb();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(MEDIA_STORE, 'readwrite');
     tx.objectStore(MEDIA_STORE).delete(refKey);
@@ -129,17 +165,6 @@ export async function deleteMediaFromIndexedDb(refKey: string): Promise<void> {
   });
 }
 
-export async function clearAllMediaInIndexedDb(): Promise<void> {
-  const db = await openMediaDb();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(MEDIA_STORE, 'readwrite');
-    tx.objectStore(MEDIA_STORE).clear();
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-/** Reads an uploaded File into a MediaAttachment object. */
 export function readImageFileAsAttachment(
   file: File,
   refKey: string,
@@ -167,15 +192,14 @@ export interface ProjectJsonBackup {
   format: 'duckomat-sge-v14-package';
   exportedAt: string;
   sourceName: string;
-  edits: ProjectEditsOverlay;
+  dataset?: SgeDataset;
+  edits?: ProjectEditsOverlay;
   palette: CustomPalette;
   media: Record<string, MediaAttachment>;
 }
 
-/** Export portable JSON package containing all edits, custom palette, and uploaded images. */
 export function downloadProjectJsonBackup(
   dataset: SgeDataset,
-  edits: ProjectEditsOverlay,
   palette: CustomPalette,
   mediaMap: Record<string, MediaAttachment>
 ): void {
@@ -183,7 +207,7 @@ export function downloadProjectJsonBackup(
     format: 'duckomat-sge-v14-package',
     exportedAt: new Date().toISOString(),
     sourceName: dataset.sourceName,
-    edits,
+    dataset,
     palette,
     media: mediaMap,
   };
@@ -202,15 +226,15 @@ export async function parseProjectJsonBackup(file: File): Promise<ProjectJsonBac
     format: 'duckomat-sge-v14-package',
     exportedAt: parsed.exportedAt ?? new Date().toISOString(),
     sourceName: parsed.sourceName ?? '',
-    edits: parsed.edits ?? createEmptyEdits(),
+    dataset: parsed.dataset,
+    edits: parsed.edits,
     palette: parsed.palette ?? DEFAULT_SGE_PALETTE,
     media: parsed.media ?? {},
   };
 }
 
 // ---------------------------------------------------------------------------
-// Minimal standards-compliant ZIP writer (STORE / method 0 with IEEE CRC32)
-// Allows zero-dependency bundling of updated .xlsx + project_state.json + public/media/*
+// Zero-dependency ZIP archive writer (STORE method with IEEE CRC32)
 // ---------------------------------------------------------------------------
 
 const CRC32_TABLE = (() => {
@@ -271,13 +295,12 @@ function createZipArchive(entries: ZipEntryInput[]): Blob {
     const data = entry.data;
     const crc = crc32(data);
 
-    // Local file header (30 bytes + name)
     const localHeader = new Uint8Array(30 + nameBytes.length);
     const lv = new DataView(localHeader.buffer);
     lv.setUint32(0, 0x04034b50, true);
-    lv.setUint16(4, 20, true); // version needed
-    lv.setUint16(6, 0x0800, true); // UTF-8 filename flag
-    lv.setUint16(8, 0, true); // compression: STORE
+    lv.setUint16(4, 20, true);
+    lv.setUint16(6, 0x0800, true);
+    lv.setUint16(8, 0, true);
     lv.setUint16(10, dosTime, true);
     lv.setUint16(12, dosDate, true);
     lv.setUint32(14, crc, true);
@@ -289,7 +312,6 @@ function createZipArchive(entries: ZipEntryInput[]): Blob {
 
     localParts.push(localHeader, data);
 
-    // Central directory header (46 bytes + name)
     const centralHeader = new Uint8Array(46 + nameBytes.length);
     const cv = new DataView(centralHeader.buffer);
     cv.setUint32(0, 0x02014b50, true);
@@ -337,35 +359,26 @@ function createZipArchive(entries: ZipEntryInput[]): Blob {
   );
 }
 
-/**
- * Exports a complete ZIP project package containing:
- * - Duckomat_Entwicklungsdatenbank_v14_aktualisiert.xlsx
- * - project_state.json
- * - public/media/<files> (ready to unpack directly into the repository)
- */
 export function downloadProjectZipPackage(
   dataset: SgeDataset,
-  edits: ProjectEditsOverlay,
   palette: CustomPalette,
   mediaMap: Record<string, MediaAttachment>
 ): void {
   const encoder = new TextEncoder();
   const entries: ZipEntryInput[] = [];
 
-  // 1. Updated 13-sheet Excel workbook
-  const xlsxBytes = buildUpdatedWorkbookBytes(dataset, edits, mediaMap);
+  const xlsxBytes = buildUpdatedWorkbookBytes(dataset, createEmptyEdits(), mediaMap);
   entries.push({
     path: 'public/Duckomat_Entwicklungsdatenbank_v14_aktualisiert.xlsx',
     data: xlsxBytes,
   });
 
-  // 2. Portable JSON state backup
   const stateJson = JSON.stringify(
     {
       format: 'duckomat-sge-v14-package',
       exportedAt: new Date().toISOString(),
       sourceName: dataset.sourceName,
-      edits,
+      dataset,
       palette,
       mediaIndex: Object.values(mediaMap).map((m) => ({
         refKey: m.refKey,
@@ -383,7 +396,6 @@ export function downloadProjectZipPackage(
     data: encoder.encode(stateJson),
   });
 
-  // 3. Uploaded media files mapped to public/media/...
   const usedPaths = new Set<string>();
   for (const media of Object.values(mediaMap)) {
     const bytes = dataUrlToBytes(media.dataUrl);
@@ -408,7 +420,6 @@ export function downloadProjectZipPackage(
     entries.push({ path: targetPath, data: bytes });
   }
 
-  // 4. Short README
   const readme = [
     'Duckomat SGE v14 – Exportiertes Projektpaket',
     '============================================',
@@ -417,7 +428,7 @@ export function downloadProjectZipPackage(
     `Enthaltene Fotos: ${usedPaths.size}`,
     '',
     'Übernahme ins Repository:',
-    '1. Entpacken Sie den Ordner "public/media/" direkt in Ihr Repository-Root.',
+    '1. Entpacken Sie "public/media/" direkt in Ihr Repository-Root.',
     '2. Ersetzen Sie bei Bedarf "public/Duckomat_Entwicklungsdatenbank_v14.xlsx"',
     '   durch "public/Duckomat_Entwicklungsdatenbank_v14_aktualisiert.xlsx".',
   ].join('\n');

@@ -4,32 +4,49 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  Edit3,
+  FlaskConical,
   Layers,
+  Lightbulb,
   Link2,
+  Plus,
   RefreshCw,
   Trash2,
 } from 'lucide-react';
 import {
+  AppMode,
   ColorMode,
   CustomPalette,
+  DetailLevel,
   MediaAttachment,
   PhaseVersionConfig,
   SgeDataset,
+  StatusCode,
   StatusColorGroup,
 } from '../types/sge';
-import { RseStateAtVersion } from '../utils/sgeAnalytics';
 import {
+  RseStateAtVersion,
+  getCausesForEvent,
+  getLearningsForEvent,
+  getMicroIterationsForRse,
+} from '../utils/sgeAnalytics';
+import {
+  ALL_STATUS_CODES,
   formatLaneCodeAndLabel,
   getLaneDisplayName,
   getSwatchForStatus,
   getVariationShortLabel,
   statusCodeToColorGroup,
 } from '../utils/sgeVisualConfig';
+import { ModalState } from './EntityEditModals';
+import { HoverTooltip, HoverTooltipData } from './HoverTooltip';
 
 interface SwimlaneBoardProps {
   dataset: SgeDataset;
   selectedVersion: PhaseVersionConfig;
   rseStates: Map<string, RseStateAtVersion>;
+  appMode: AppMode;
+  detailLevel: DetailLevel;
   activeColorFilters: StatusColorGroup[];
   colorMode: ColorMode;
   palette: CustomPalette;
@@ -37,13 +54,16 @@ interface SwimlaneBoardProps {
   selectedRseId: string | null;
   mediaMap: Record<string, MediaAttachment>;
   onSelectRse: (rseId: string) => void;
-  onSelectKombi?: (kombiId: string) => void;
+  onQuickStatusChange: (rseId: string, versionKey: string, nextStatus: StatusCode) => void;
+  onOpenModal: (modal: ModalState) => void;
 }
 
 export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
   dataset,
   selectedVersion,
   rseStates,
+  appMode,
+  detailLevel,
   activeColorFilters,
   colorMode,
   palette,
@@ -51,34 +71,41 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
   selectedRseId,
   mediaMap,
   onSelectRse,
+  onQuickStatusChange,
+  onOpenModal,
 }) => {
+  const isEdit = appMode === 'edit';
   const [expandedLanes, setExpandedLanes] = useState<Set<string>>(new Set());
   const [showFutureSection, setShowFutureSection] = useState(false);
+  const [tooltip, setTooltip] = useState<HoverTooltipData | null>(null);
 
   const dashboardBySpur = useMemo(
     () => new Map(dataset.dashboard.map((d) => [d.spurId, d])),
     [dataset.dashboard]
   );
 
-  // Count uploaded photos per RSE (from events + micro-iterations)
-  const photoCountByRse = useMemo(() => {
-    const map = new Map<string, number>();
+  const photoInfoByRse = useMemo(() => {
+    const countMap = new Map<string, number>();
+    const previewMap = new Map<string, string>();
+    const addPhoto = (rseId: string, url: string) => {
+      countMap.set(rseId, (countMap.get(rseId) ?? 0) + 1);
+      if (!previewMap.has(rseId)) previewMap.set(rseId, url);
+    };
+    for (const r of dataset.rseList) {
+      const att = mediaMap[`rse:${r.rseId}`];
+      if (att?.dataUrl) addPhoto(r.rseId, att.dataUrl);
+    }
     for (const ev of dataset.events) {
-      const key = ev.mediaRef || `event:${ev.eventId}`;
-      if (mediaMap[key] || mediaMap[`event:${ev.eventId}`]) {
-        map.set(ev.rseId, (map.get(ev.rseId) ?? 0) + 1);
-      }
+      const att = (ev.mediaRef ? mediaMap[ev.mediaRef] : undefined) ?? mediaMap[`event:${ev.eventId}`];
+      if (att?.dataUrl) addPhoto(ev.rseId, att.dataUrl);
     }
     for (const m of dataset.microIterations) {
-      const key = m.mediaRef || `micro:${m.id}`;
-      if (mediaMap[key] || mediaMap[`micro:${m.id}`]) {
-        map.set(m.rseId, (map.get(m.rseId) ?? 0) + 1);
-      }
+      const att = (m.mediaRef ? mediaMap[m.mediaRef] : undefined) ?? mediaMap[`micro:${m.id}`];
+      if (att?.dataUrl) addPhoto(m.rseId, att.dataUrl);
     }
-    return map;
-  }, [dataset.events, dataset.microIterations, mediaMap]);
+    return { countMap, previewMap };
+  }, [dataset.rseList, dataset.events, dataset.microIterations, mediaMap]);
 
-  // Search haystack per RSE
   const searchMatchesRse = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return null;
@@ -112,7 +139,6 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
     return false;
   };
 
-  // Partition RSE into: active per lane, removed/replaced, and future
   const { activeByLane, removedList, futureList } = useMemo(() => {
     const byLane = new Map<string, RseStateAtVersion[]>();
     for (const lane of dataset.lanes) byLane.set(lane, []);
@@ -136,7 +162,6 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
       }
     }
 
-    // Sort removed: items removed IN this exact version come first
     removed.sort((a, b) => {
       if (a.presence === 'removed_here' && b.presence !== 'removed_here') return -1;
       if (a.presence !== 'removed_here' && b.presence === 'removed_here') return 1;
@@ -161,13 +186,18 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
     const isMatch = matchesColorFilter(st);
     const isSelected = selectedRseId === rse.rseId;
     const isRemoved = presence === 'removed_here' || presence === 'removed_earlier';
-    const effectiveCode = isRemoved ? 'REM' : statusCode;
+    const effectiveCode = (isRemoved ? 'REM' : statusCode) as StatusCode | '';
     const swatch = getSwatchForStatus(effectiveCode, colorMode, palette, rse.currentLifecycle);
-    const photoCount = photoCountByRse.get(rse.rseId) ?? 0;
-    const activeDescription =
-      eventAtVersion?.stateDescription ||
-      latestEventUpToVersion?.stateDescription ||
-      rse.functionSummary;
+    const photoCount = photoInfoByRse.countMap.get(rse.rseId) ?? 0;
+    const previewImg = photoInfoByRse.previewMap.get(rse.rseId);
+    const activeEvent = eventAtVersion ?? latestEventUpToVersion;
+    const activeDescription = activeEvent?.stateDescription || rse.functionSummary;
+
+    const showShortDesc = detailLevel >= 2 || isLaneExpanded;
+    const showDeepDiveInline = detailLevel === 3;
+    const linkedCauses = activeEvent ? getCausesForEvent(activeEvent, dataset) : [];
+    const linkedLearnings = activeEvent ? getLearningsForEvent(activeEvent, dataset) : [];
+    const rseMicros = showDeepDiveInline ? getMicroIterationsForRse(rse.rseId, dataset) : [];
 
     return (
       <article
@@ -181,6 +211,25 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
             onSelectRse(rse.rseId);
           }
         }}
+        onMouseEnter={(e) => {
+          const c0 = linkedCauses[0];
+          setTooltip({
+            x: e.clientX,
+            y: e.clientY,
+            badge: effectiveCode || undefined,
+            badgeSwatch: swatch,
+            title: `${rse.rseId} · ${rse.name}`,
+            subtitle: `${selectedVersion.phaseName}${eventAtVersion ? ` (${eventAtVersion.eventId})` : ''}`,
+            description: activeDescription,
+            rationale: activeEvent?.rationale || undefined,
+            causeLabel: c0 ? `${c0.id}: ${c0.title}` : undefined,
+            previewImageUrl: previewImg,
+          });
+        }}
+        onMouseMove={(e) =>
+          setTooltip((prev) => (prev ? { ...prev, x: e.clientX, y: e.clientY } : prev))
+        }
+        onMouseLeave={() => setTooltip(null)}
         style={{
           backgroundColor: swatch.bg,
           borderColor: swatch.border,
@@ -192,101 +241,186 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
             : 'hover:shadow-sm hover:brightness-[0.98]'
         } ${!isMatch ? 'opacity-20 saturate-50 hover:opacity-75' : 'opacity-100'}`}
       >
-        {/* Top line: RSE_ID + Status_Code badge + Variationsart */}
-        <div className="flex items-center justify-between gap-1.5">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <span
-              style={{ color: swatch.text }}
-              className="font-mono text-xs font-bold tracking-tight"
-            >
-              {rse.rseId}
-            </span>
-            {effectiveCode && (
-              <span
-                style={{
-                  borderColor: swatch.border,
-                  color: swatch.text,
-                }}
-                className="rounded border bg-white/80 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none"
-              >
-                {effectiveCode}
-              </span>
-            )}
-            {colorMode === 'variation' && effectiveCode && (
+        <div>
+          {/* Top Row: RSE_ID + Status Code (or ISEM Picker in Edit Mode) */}
+          <div className="flex items-center justify-between gap-1.5">
+            <div className="flex items-center gap-1.5 min-w-0">
               <span
                 style={{ color: swatch.text }}
-                className="font-mono text-[10px] font-semibold opacity-80"
+                className="font-mono text-xs font-bold tracking-tight"
               >
-                {getVariationShortLabel(effectiveCode)}
+                {rse.rseId}
               </span>
-            )}
+              {isEdit && effectiveCode ? (
+                <select
+                  value={effectiveCode}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) =>
+                    onQuickStatusChange(
+                      rse.rseId,
+                      selectedVersion.versionKey,
+                      e.target.value as StatusCode
+                    )
+                  }
+                  aria-label={`ISEM-Farbcode für ${rse.rseId}`}
+                  className="rounded border border-black/20 bg-white/90 px-1 py-0.5 font-mono text-[10px] font-bold text-slate-900"
+                >
+                  {ALL_STATUS_CODES.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                effectiveCode && (
+                  <span
+                    style={{ borderColor: swatch.border, color: swatch.text }}
+                    className="rounded border bg-white/80 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none"
+                  >
+                    {effectiveCode}
+                  </span>
+                )
+              )}
+              {colorMode === 'variation' && effectiveCode && (
+                <span
+                  style={{ color: swatch.text }}
+                  className="font-mono text-[10px] font-semibold opacity-80"
+                >
+                  {getVariationShortLabel(effectiveCode)}
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-1 shrink-0">
+              {photoCount > 0 && (
+                <span
+                  title={`${photoCount} Foto(s)`}
+                  className="inline-flex items-center gap-0.5 rounded bg-white/80 px-1 py-0.5 font-mono text-[10px] font-semibold text-slate-700"
+                >
+                  <Camera className="h-2.5 w-2.5" />
+                  {photoCount}
+                </span>
+              )}
+              {isEdit && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenModal({ kind: 'edit-rse', rse });
+                  }}
+                  title={`RSE ${rse.rseId} bearbeiten`}
+                  className="rounded bg-white/80 p-1 text-slate-700 hover:bg-white"
+                >
+                  <Edit3 className="h-3 w-3" />
+                </button>
+              )}
+            </div>
           </div>
 
-          {/* Right compact indicators */}
-          <div className="flex items-center gap-1 shrink-0">
-            {photoCount > 0 && (
-              <span
-                title={`${photoCount} Foto(s) hinterlegt`}
-                className="inline-flex items-center gap-0.5 rounded bg-white/80 px-1 py-0.5 font-mono text-[10px] font-semibold text-slate-700"
-              >
-                <Camera className="h-2.5 w-2.5" />
-                {photoCount}
-              </span>
-            )}
-            {eventAtVersion && !isRemoved && (
-              <span
-                title={`Direktes Event in ${selectedVersion.versionKey}: ${eventAtVersion.eventId}`}
-                className="h-2 w-2 rounded-full"
-                style={{ backgroundColor: swatch.border }}
-              />
-            )}
-          </div>
+          {/* RSE Name */}
+          <h4
+            style={{ color: swatch.text }}
+            className="mt-1.5 text-[12px] font-semibold leading-snug line-clamp-2"
+            title={rse.name}
+          >
+            {rse.name}
+          </h4>
+
+          {/* Stufe 2 & 3: Short state description */}
+          {showShortDesc && activeDescription && (
+            <p
+              style={{ color: swatch.text }}
+              className="mt-1.5 border-t border-black/10 pt-1.5 text-[11px] leading-relaxed opacity-90 line-clamp-2"
+            >
+              {activeDescription}
+            </p>
+          )}
+
+          {/* Stufe 3 (Deep Dive): Inline Causes, Micro-Iterations, Learnings & Photo */}
+          {showDeepDiveInline && (
+            <div className="mt-2 space-y-1.5 border-t border-black/10 pt-1.5 text-[10px]">
+              {linkedCauses.length > 0 && (
+                <div className="space-y-1">
+                  {linkedCauses.map((c) => (
+                    <div key={c.id} className="rounded bg-white/80 p-1.5 text-slate-800">
+                      <div className="flex items-center gap-1 font-mono font-bold text-amber-800">
+                        <FlaskConical className="h-2.5 w-2.5" />
+                        <span>{c.id}: {c.title}</span>
+                      </div>
+                      <p className="mt-0.5 line-clamp-2 text-[10px] text-slate-700">
+                        <strong>Fakt:</strong> {c.observation}
+                      </p>
+                      {c.hypothesis && (
+                        <p className="mt-0.5 line-clamp-2 text-[10px] text-slate-600">
+                          <strong>Hypothese:</strong> {c.hypothesis}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {rseMicros.length > 0 && (
+                <div className="rounded bg-blue-50/90 p-1.5 text-blue-950">
+                  <div className="font-bold">↻ {rseMicros.length} Mikro-Iterationen:</div>
+                  <div className="mt-0.5 line-clamp-2">
+                    {rseMicros.map((m) => `${m.subVersionId} (${m.detailBox})`).join(' · ')}
+                  </div>
+                </div>
+              )}
+
+              {linkedLearnings.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {linkedLearnings.map((l) => (
+                    <span
+                      key={l.id}
+                      className="inline-flex items-center gap-0.5 rounded bg-indigo-100 px-1.5 py-0.5 font-mono text-[9px] font-bold text-indigo-900"
+                    >
+                      <Lightbulb className="h-2.5 w-2.5" />
+                      {l.id}: {l.title.slice(0, 26)}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {previewImg && (
+                <img
+                  src={previewImg}
+                  alt={rse.name}
+                  className="h-20 w-full rounded border border-black/10 object-cover"
+                />
+              )}
+            </div>
+          )}
+
+          {/* Removal badge when in Removed section */}
+          {isRemoved && (
+            <div className="mt-1.5 space-y-0.5 text-[10px] font-medium text-red-900">
+              <div>
+                {presence === 'removed_here'
+                  ? `Entfernt / ersetzt in ${selectedVersion.versionKey}`
+                  : `Bereits entfernt seit ${st.removedInVersionLabel ?? rse.removalVersion}`}
+              </div>
+              {rse.predecessorOrReplacement && (
+                <div className="truncate opacity-85" title={rse.predecessorOrReplacement}>
+                  {rse.predecessorOrReplacement}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
-        {/* Title */}
-        <h4
-          style={{ color: swatch.text }}
-          className="mt-1.5 text-[12px] font-semibold leading-snug line-clamp-2"
-          title={rse.name}
-        >
-          {rse.name}
-        </h4>
-
-        {/* Inline preview when Spur Deep-Dive is expanded */}
-        {isLaneExpanded && activeDescription && (
-          <p
-            style={{ color: swatch.text }}
-            className="mt-1.5 border-t border-black/10 pt-1.5 text-[11px] leading-relaxed opacity-90 line-clamp-3"
-          >
-            {activeDescription}
-          </p>
-        )}
-
-        {/* Removal info if in Removed section */}
-        {isRemoved && (
-          <div className="mt-1.5 space-y-0.5 text-[10px] font-medium text-red-900">
-            <div>
-              {presence === 'removed_here'
-                ? `Entfernt / ersetzt in ${selectedVersion.versionKey}`
-                : `Bereits entfernt seit ${st.removedInVersionLabel ?? rse.removalVersion}`}
-            </div>
-            {rse.predecessorOrReplacement && (
-              <div className="truncate opacity-85" title={rse.predecessorOrReplacement}>
-                {rse.predecessorOrReplacement}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Bottom Badges: Events count, Micro-Iterations (↻ n Iterationen), KOMBI-xx */}
+        {/* Bottom Badges: Events, Micro-Iterations, KOMBI */}
         <div className="mt-2 flex flex-wrap items-center gap-1">
-          <span
-            title={`${rse.versionEventsCount} Versions-Events in RSE_Phasenwechsel`}
-            className="inline-flex items-center gap-0.5 rounded bg-white/75 px-1.5 py-0.5 font-mono text-[10px] font-medium text-slate-700"
-          >
-            <Layers className="h-2.5 w-2.5 opacity-70" />
-            <span>{rse.versionEventsCount} Ev.</span>
-          </span>
+          {detailLevel >= 2 && (
+            <span
+              title={`${rse.versionEventsCount} Versions-Events`}
+              className="inline-flex items-center gap-0.5 rounded bg-white/75 px-1.5 py-0.5 font-mono text-[10px] font-medium text-slate-700"
+            >
+              <Layers className="h-2.5 w-2.5 opacity-70" />
+              <span>{rse.versionEventsCount} Ev.</span>
+            </span>
+          )}
 
           {rse.microIterationsCount > 0 && (
             <span
@@ -294,7 +428,7 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
               className="inline-flex items-center gap-0.5 rounded bg-white/80 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-blue-800"
             >
               <RefreshCw className="h-2.5 w-2.5" />
-              <span>↻ {rse.microIterationsCount} Iterationen</span>
+              <span>↻ {rse.microIterationsCount}</span>
             </span>
           )}
 
@@ -320,7 +454,6 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
 
   return (
     <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
-      {/* 9 Systemspuren Swimlanes */}
       <div className="space-y-3">
         {dataset.lanes.map((spurId) => {
           const laneItems = activeByLane.get(spurId) ?? [];
@@ -329,10 +462,8 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
           const laneTitle = getLaneDisplayName(spurId, dash?.name);
           const isExpanded = expandedLanes.has(spurId);
 
-          // If searching and lane has 0 active items, skip empty lanes
           if (searchMatchesRse && laneItems.length === 0) return null;
 
-          // Lane-level summary badges for current version
           const changedInVersion = laneItems.filter(
             (st) => st.eventAtVersion && st.statusCode !== 'CV' && st.statusCode !== 'BASE'
           ).length;
@@ -346,14 +477,14 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
               key={spurId}
               className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xs dark:border-slate-800 dark:bg-slate-900"
             >
-              {/* Clickable Spur Header (toggles Spur Deep-Dive) */}
-              <button
-                type="button"
-                onClick={() => toggleLaneDeepDive(spurId)}
-                aria-expanded={isExpanded}
-                className="flex w-full flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/80 px-3.5 py-2.5 text-left transition-colors hover:bg-slate-100/80 dark:border-slate-800 dark:bg-slate-950/50 dark:hover:bg-slate-800/60"
-              >
-                <div className="flex items-center gap-2.5 min-w-0">
+              {/* Spur Header */}
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/80 px-3.5 py-2 dark:border-slate-800 dark:bg-slate-950/50">
+                <button
+                  type="button"
+                  onClick={() => toggleLaneDeepDive(spurId)}
+                  aria-expanded={isExpanded}
+                  className="flex flex-1 items-center gap-2.5 min-w-0 text-left"
+                >
                   {isExpanded ? (
                     <ChevronDown className="h-4 w-4 text-slate-500 shrink-0" />
                   ) : (
@@ -365,12 +496,12 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
                   <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100 truncate">
                     {laneTitle}
                   </h3>
-                  {dash?.role && (
-                    <span className="hidden lg:inline max-w-[460px] truncate text-xs text-slate-500 dark:text-slate-400">
+                  {detailLevel >= 2 && dash?.role && (
+                    <span className="hidden lg:inline max-w-[440px] truncate text-xs text-slate-500 dark:text-slate-400">
                       — {dash.role}
                     </span>
                   )}
-                </div>
+                </button>
 
                 <div className="flex flex-wrap items-center gap-1.5 text-[11px] tabular-nums shrink-0">
                   <span className="rounded-md border border-slate-200 bg-white px-2 py-0.5 font-medium text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
@@ -412,15 +543,35 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
                       {kombiCountInLane} KOMBI
                     </span>
                   )}
-                  {dash && dash.microIterationsCount > 0 && (
-                    <span className="rounded-md border border-blue-200 bg-blue-50 px-2 py-0.5 font-mono text-[10px] font-semibold text-blue-800 dark:border-blue-800 dark:bg-blue-950/60 dark:text-blue-200">
-                      ↻ {dash.microIterationsCount}
-                    </span>
+                  {isEdit && dash && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenModal({ kind: 'edit-spur', spur: dash })}
+                      title="Spur bearbeiten"
+                      className="rounded border border-slate-200 bg-white p-1 text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                    >
+                      <Edit3 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                  {isEdit && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onOpenModal({
+                          kind: 'add-rse',
+                          defaultSpur: spurId,
+                          defaultVersionKey: selectedVersion.versionKey,
+                        })
+                      }
+                      className="inline-flex items-center gap-1 rounded-md bg-blue-600 px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-blue-700"
+                    >
+                      <Plus className="h-3 w-3" />
+                      <span>RSE</span>
+                    </button>
                   )}
                 </div>
-              </button>
+              </div>
 
-              {/* Spur Deep-Dive Summary Drawer (Inline) */}
               {isExpanded && dash && (
                 <div className="border-b border-slate-100 bg-blue-50/40 px-4 py-2.5 text-xs dark:border-slate-800 dark:bg-blue-950/20">
                   <div className="grid gap-2 md:grid-cols-2">
@@ -432,7 +583,7 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
                     </div>
                     <div>
                       <span className="font-semibold text-slate-600 dark:text-slate-400">
-                        SGE-Reifegrad (v2.2):{' '}
+                        SGE-Reifegrad:{' '}
                       </span>
                       <span className="text-slate-800 dark:text-slate-200">
                         {dash.maturitySummary}
@@ -442,14 +593,19 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
                 </div>
               )}
 
-              {/* Active RSE Cards Grid */}
               <div className="p-3">
                 {laneItems.length === 0 ? (
                   <p className="py-2 text-xs italic text-slate-400 dark:text-slate-500">
                     Keine aktiven RSE in dieser Spur bei {selectedVersion.versionKey}.
                   </p>
                 ) : (
-                  <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5">
+                  <div
+                    className={`grid grid-cols-1 gap-2.5 ${
+                      detailLevel === 3
+                        ? 'md:grid-cols-2 xl:grid-cols-3'
+                        : 'sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5'
+                    }`}
+                  >
                     {laneItems.map((st) => renderRseCard(st, isExpanded))}
                   </div>
                 )}
@@ -459,7 +615,7 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
         })}
       </div>
 
-      {/* Dedicated Section: Entfernte / Ersetzte RSE (REM) */}
+      {/* Removed / Replaced RSE Section */}
       {removedList.length > 0 && (
         <section className="overflow-hidden rounded-xl border-2 border-dashed border-red-300 bg-red-50/40 dark:border-red-900/70 dark:bg-red-950/20">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-red-200/80 bg-red-50/80 px-4 py-2.5 dark:border-red-900/60 dark:bg-red-950/40">
@@ -472,9 +628,6 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
                 {removedList.length}
               </span>
             </div>
-            <span className="text-xs text-red-700/90 dark:text-red-300">
-              Elemente mit Status REM in {selectedVersion.versionKey} oder früheren Versionen
-            </span>
           </div>
           <div className="grid grid-cols-1 gap-2.5 p-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5">
             {removedList.map((st) => renderRseCard(st, false))}
@@ -482,7 +635,7 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
         </section>
       )}
 
-      {/* Collapsible Footer Pill for Not-Yet-Introduced RSE (when slider < v2.2) */}
+      {/* Future RSE Collapse */}
       {futureList.length > 0 && (
         <section className="rounded-xl border border-slate-200 bg-slate-50/80 dark:border-slate-800 dark:bg-slate-900/60">
           <button
@@ -494,15 +647,10 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
               <Clock className="h-3.5 w-3.5" />
               <span>
                 Noch nicht eingeführte RSE bei {selectedVersion.versionKey}:{' '}
-                <strong className="font-mono">{futureList.length}</strong> (erscheinen in späteren
-                Versionen)
+                <strong className="font-mono">{futureList.length}</strong>
               </span>
             </span>
-            {showFutureSection ? (
-              <ChevronDown className="h-4 w-4" />
-            ) : (
-              <ChevronRight className="h-4 w-4" />
-            )}
+            {showFutureSection ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
           </button>
 
           {showFutureSection && (
@@ -531,6 +679,8 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
           )}
         </section>
       )}
+
+      <HoverTooltip data={tooltip} />
     </div>
   );
 };

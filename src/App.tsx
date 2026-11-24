@@ -1,24 +1,24 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Loader2, Upload } from 'lucide-react';
-import { CausalGraphView } from './components/CausalGraphView';
 import { DataTablesView } from './components/DataTablesView';
+import { EntityEditModals, ModalState } from './components/EntityEditModals';
 import { Header } from './components/Header';
 import { IntegrationsAndMediaView } from './components/IntegrationsAndMediaView';
 import { IntegrityBanner } from './components/IntegrityBanner';
 import { LightboxModal, LightboxPayload } from './components/LightboxModal';
 import { RseDeepDiveDrawer } from './components/RseDeepDiveDrawer';
 import { RseMatrixView } from './components/RseMatrixView';
+import { Swimlane2DGraphView } from './components/Swimlane2DGraphView';
 import { SwimlaneBoard } from './components/SwimlaneBoard';
 import { VersionTimelineBar } from './components/VersionTimelineBar';
 import {
+  AppMode,
   ColorMode,
   CustomPalette,
-  EventEditPatch,
-  IntegrityReport,
+  DetailLevel,
   MediaAttachment,
-  MicroIterationEditPatch,
-  ProjectEditsOverlay,
   SgeDataset,
+  StatusCode,
   StatusColorGroup,
   WorkspaceView,
 } from './types/sge';
@@ -26,58 +26,83 @@ import {
   downloadUpdatedXlsx,
   parseExcelBuffer,
   parseExcelFile,
+  validateSgeDataset,
 } from './utils/excelParser';
 import {
-  applyEditsToDataset,
   computeRseStatesAtVersion,
   computeVersionKpis,
 } from './utils/sgeAnalytics';
 import {
+  addMicroIteration,
+  addRse,
+  deleteArrow,
+  deleteCause,
+  deleteKombi,
+  deleteLearning,
+  deleteMicroIteration,
+  deleteRse,
+  deleteRseEvent,
+  updateMicroIteration,
+  updateRse,
+  updateSpur,
+  updateVersionConfig,
+  upsertArrow,
+  upsertCause,
+  upsertKombi,
+  upsertLearning,
+  upsertRseEvent,
+} from './utils/sgeMutations';
+import {
+  clearPersistedDatasetInIndexedDb,
+  createEmptyEdits,
   deleteMediaFromIndexedDb,
   downloadProjectJsonBackup,
   downloadProjectZipPackage,
   loadAllMediaFromIndexedDb,
-  loadEditsFromLocalStorage,
   loadPaletteFromLocalStorage,
+  loadPersistedDatasetFromIndexedDb,
   parseProjectJsonBackup,
   readImageFileAsAttachment,
-  saveEditsToLocalStorage,
   saveMediaToIndexedDb,
   savePaletteToLocalStorage,
+  savePersistedDatasetToIndexedDb,
 } from './utils/storage';
 
 const DEFAULT_XLSX_URL = '/Duckomat_Entwicklungsdatenbank_v14.xlsx';
 
 export default function App() {
-  const [rawDataset, setRawDataset] = useState<SgeDataset | null>(null);
-  const [report, setReport] = useState<IntegrityReport | null>(null);
+  const [dataset, setDataset] = useState<SgeDataset | null>(null);
+  const [changeCount, setChangeCount] = useState<number>(0);
   const [loading, setLoading] = useState(true);
   const [importError, setImportError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  const [activeView, setActiveView] = useState<WorkspaceView>('swimlane');
+  // Global Multi-View, Mode (Presentation vs Edit), and 3-Stage Detail Depth
+  const [activeView, setActiveView] = useState<WorkspaceView>('board');
+  const [appMode, setAppMode] = useState<AppMode>('presentation');
+  const [detailLevel, setDetailLevel] = useState<DetailLevel>(1);
+
   const [darkMode, setDarkMode] = useState(false);
   const [integrityOpen, setIntegrityOpen] = useState(false);
-  const [isDraggingXlsx, setIsDraggingXlsx] = useState(false);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
 
   // Version Slider, SGE Color Filters, Color Mode, Custom Palette, Search
-  const [selectedVersionIndex, setSelectedVersionIndex] = useState<number>(6); // default v2.2
+  const [selectedVersionIndex, setSelectedVersionIndex] = useState<number>(6);
   const [activeColorFilters, setActiveColorFilters] = useState<StatusColorGroup[]>([]);
   const [colorMode, setColorMode] = useState<ColorMode>('planning');
   const [palette, setPalette] = useState<CustomPalette>(() => loadPaletteFromLocalStorage());
   const [searchQuery, setSearchQuery] = useState('');
 
-  // RSE Deep-Dive Drawer & Lightbox
+  // Right Deep-Dive Drawer (RSE or Arrow), Edit Modal, and Lightbox
   const [selectedRseId, setSelectedRseId] = useState<string | null>(null);
+  const [selectedArrowId, setSelectedArrowId] = useState<string | null>(null);
+  const [modal, setModal] = useState<ModalState>(null);
   const [lightboxItem, setLightboxItem] = useState<LightboxPayload | null>(null);
 
-  // Local Persistence: Text/Status Edits (localStorage) + Media (IndexedDB)
-  const [edits, setEdits] = useState<ProjectEditsOverlay>(() => loadEditsFromLocalStorage());
+  // Locally persisted media (IndexedDB)
   const [mediaMap, setMediaMap] = useState<Record<string, MediaAttachment>>({});
 
-  const showToast = useCallback((msg: string) => {
-    setToast(msg);
-  }, []);
+  const showToast = useCallback((msg: string) => setToast(msg), []);
 
   useEffect(() => {
     if (!toast) return;
@@ -92,29 +117,35 @@ export default function App() {
     else root.classList.remove('dark');
   }, [darkMode]);
 
-  // Load persisted photos from IndexedDB on startup
-  useEffect(() => {
-    loadAllMediaFromIndexedDb().then((loaded) => setMediaMap(loaded));
-  }, []);
-
-  // Load bundled v14 Excel database automatically from public/
-  const loadBundledDefault = useCallback(async () => {
+  // Load persisted photos + check for locally saved dataset state in IndexedDB
+  const loadBundledDefault = useCallback(async (ignoreSaved = false) => {
     setLoading(true);
     setImportError(null);
     try {
+      if (!ignoreSaved) {
+        const persisted = await loadPersistedDatasetFromIndexedDb();
+        if (persisted?.dataset && persisted.dataset.rseList.length > 0) {
+          setDataset(persisted.dataset);
+          setChangeCount(persisted.changeCount ?? 0);
+          setSelectedVersionIndex(Math.max(0, persisted.dataset.versions.length - 1));
+          setLoading(false);
+          return;
+        }
+      }
+
       const res = await fetch(DEFAULT_XLSX_URL);
       if (!res.ok) {
         throw new Error(`HTTP ${res.status} beim Laden von ${DEFAULT_XLSX_URL}`);
       }
       const buffer = await res.arrayBuffer();
-      const { dataset, report: nextReport } = parseExcelBuffer(
+      const { dataset: parsed, report: nextReport } = parseExcelBuffer(
         buffer,
         'Duckomat_Entwicklungsdatenbank_v14.xlsx',
         true
       );
-      setRawDataset(dataset);
-      setReport(nextReport);
-      setSelectedVersionIndex(Math.max(0, dataset.versions.length - 1));
+      setDataset(parsed);
+      setChangeCount(0);
+      setSelectedVersionIndex(Math.max(0, parsed.versions.length - 1));
       setIntegrityOpen(nextReport.errorCount > 0);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Unbekannter Ladefehler';
@@ -127,14 +158,30 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    loadBundledDefault();
+    loadAllMediaFromIndexedDb().then((loaded) => setMediaMap(loaded));
+    loadBundledDefault(false);
   }, [loadBundledDefault]);
 
-  // Merge locally persisted edits into dataset reactively
-  const dataset = useMemo(
-    () => (rawDataset ? applyEditsToDataset(rawDataset, edits) : null),
-    [rawDataset, edits]
+  // Central mutation helper: updates live dataset & persists to IndexedDB automatically
+  const mutateDataset = useCallback(
+    (updater: (prev: SgeDataset) => SgeDataset, toastMsg?: string) => {
+      setDataset((prev) => {
+        if (!prev) return prev;
+        const next = updater(prev);
+        setChangeCount((c) => {
+          const nextCount = c + 1;
+          savePersistedDatasetToIndexedDb(next, nextCount);
+          return nextCount;
+        });
+        return next;
+      });
+      if (toastMsg) showToast(toastMsg);
+    },
+    [showToast]
   );
+
+  // Live Integrity Report recomputed on every dataset mutation
+  const report = useMemo(() => (dataset ? validateSgeDataset(dataset) : null), [dataset]);
 
   const selectedVersion = useMemo(() => {
     if (!dataset || dataset.versions.length === 0) return null;
@@ -157,47 +204,48 @@ export default function App() {
     [dataset]
   );
 
-  // Keyboard shortcuts: Left/Right for Version Slider, Escape to close Drawer
+  // Keyboard shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      if (e.key === 'Escape' && !lightboxItem) {
+      if (e.key === 'Escape' && !lightboxItem && !modal) {
         setSelectedRseId(null);
+        setSelectedArrowId(null);
       } else if (
         e.key === 'ArrowRight' &&
         dataset &&
-        (activeView === 'swimlane' || activeView === 'matrix')
+        (activeView === 'board' || activeView === 'matrix')
       ) {
         setSelectedVersionIndex((p) => Math.min(dataset.versions.length - 1, p + 1));
       } else if (
         e.key === 'ArrowLeft' &&
         dataset &&
-        (activeView === 'swimlane' || activeView === 'matrix')
+        (activeView === 'board' || activeView === 'matrix')
       ) {
         setSelectedVersionIndex((p) => Math.max(0, p - 1));
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [dataset, activeView, lightboxItem]);
+  }, [dataset, activeView, lightboxItem, modal]);
 
   // Excel File Import
   const handleExcelFileSelected = useCallback(
     async (file: File) => {
       if (!file.name.match(/\.(xlsx|xls)$/i)) {
-        setImportError(
-          `Ungültiges Dateiformat ("${file.name}"). Bitte eine .xlsx-Datei auswählen.`
-        );
+        setImportError(`Ungültiges Dateiformat ("${file.name}"). Bitte eine .xlsx-Datei auswählen.`);
         return;
       }
       try {
         setImportError(null);
         const { dataset: parsed, report: nextReport } = await parseExcelFile(file);
-        setRawDataset(parsed);
-        setReport(nextReport);
+        await clearPersistedDatasetInIndexedDb();
+        setDataset(parsed);
+        setChangeCount(0);
         setSelectedVersionIndex(Math.max(0, parsed.versions.length - 1));
         setSelectedRseId(null);
+        setSelectedArrowId(null);
         setActiveColorFilters([]);
         setSearchQuery('');
         setIntegrityOpen(nextReport.errorCount > 0 || nextReport.warningCount > 0);
@@ -212,59 +260,37 @@ export default function App() {
     [showToast]
   );
 
+  // Reset to original bundled Excel
+  const handleResetLocalChanges = useCallback(async () => {
+    await clearPersistedDatasetInIndexedDb();
+    await loadBundledDefault(true);
+    showToast('Original-Excel v14 wiederhergestellt');
+  }, [loadBundledDefault, showToast]);
+
   // Palette change
   const handleChangePalette = useCallback((next: CustomPalette) => {
     setPalette(next);
     savePaletteToLocalStorage(next);
   }, []);
 
-  // Color Legend Filter Toggle
   const handleToggleColorFilter = useCallback((group: StatusColorGroup) => {
     setActiveColorFilters((prev) =>
       prev.includes(group) ? prev.filter((g) => g !== group) : [...prev, group]
     );
   }, []);
 
-  // Local Event & Micro-Iteration Edits
-  const handleEditEvent = useCallback(
-    (eventId: string, patch: EventEditPatch) => {
-      setEdits((prev) => {
-        const next: ProjectEditsOverlay = {
-          ...prev,
-          events: {
-            ...prev.events,
-            [eventId]: { ...prev.events[eventId], ...patch },
-          },
-          updatedAt: new Date().toISOString(),
-        };
-        saveEditsToLocalStorage(next);
-        return next;
-      });
-      showToast(`Änderung an ${eventId} lokal gespeichert`);
+  // Quick ISEM Status_Code change directly on any card/node/event
+  const handleQuickStatusChange = useCallback(
+    (rseId: string, versionKey: string, nextStatus: StatusCode) => {
+      mutateDataset(
+        (prev) => upsertRseEvent(prev, { rseId, versionKey, statusCode: nextStatus }),
+        `${rseId} (${versionKey}) → ${nextStatus}`
+      );
     },
-    [showToast]
+    [mutateDataset]
   );
 
-  const handleEditMicroIteration = useCallback(
-    (microId: string, patch: MicroIterationEditPatch) => {
-      setEdits((prev) => {
-        const next: ProjectEditsOverlay = {
-          ...prev,
-          microIterations: {
-            ...prev.microIterations,
-            [microId]: { ...prev.microIterations[microId], ...patch },
-          },
-          updatedAt: new Date().toISOString(),
-        };
-        saveEditsToLocalStorage(next);
-        return next;
-      });
-      showToast(`Mikro-Iteration ${microId} lokal aktualisiert`);
-    },
-    [showToast]
-  );
-
-  // Photo Upload / Caption / Delete (IndexedDB)
+  // Media Upload / Caption / Delete
   const handleUploadMedia = useCallback(
     async (refKey: string, file: File) => {
       try {
@@ -272,7 +298,7 @@ export default function App() {
         const attachment = await readImageFileAsAttachment(file, refKey, existingCaption);
         await saveMediaToIndexedDb(attachment);
         setMediaMap((prev) => ({ ...prev, [refKey]: attachment }));
-        showToast(`Foto "${file.name}" lokal gespeichert (${refKey})`);
+        showToast(`Foto "${file.name}" gespeichert (${refKey})`);
       } catch (err) {
         setImportError(err instanceof Error ? err.message : 'Foto-Upload fehlgeschlagen.');
       }
@@ -309,13 +335,16 @@ export default function App() {
     [showToast]
   );
 
-  // JSON Backup Restore
+  // JSON Project Package Import
   const handleJsonBackupImport = useCallback(
     async (file: File) => {
       try {
         const backup = await parseProjectJsonBackup(file);
-        setEdits(backup.edits);
-        saveEditsToLocalStorage(backup.edits);
+        if (backup.dataset) {
+          setDataset(backup.dataset);
+          setChangeCount(1);
+          await savePersistedDatasetToIndexedDb(backup.dataset, 1);
+        }
         setPalette(backup.palette);
         savePaletteToLocalStorage(backup.palette);
 
@@ -326,37 +355,31 @@ export default function App() {
         }
         setMediaMap(nextMedia);
         showToast(
-          `Backup geladen: ${Object.keys(backup.media).length} Fotos & Pflegestände wiederhergestellt`
+          `Projektpaket geladen (${Object.keys(backup.media).length} Fotos wiederhergestellt)`
         );
       } catch (err) {
-        setImportError(err instanceof Error ? err.message : 'JSON-Backup konnte nicht geladen werden.');
+        setImportError(
+          err instanceof Error ? err.message : 'JSON-Backup konnte nicht geladen werden.'
+        );
       }
     },
     [mediaMap, showToast]
   );
 
-  const editCount =
-    Object.keys(edits.events).length +
-    Object.keys(edits.microIterations).length +
-    Object.keys(edits.kombis).length;
-  const mediaCount = Object.keys(mediaMap).length;
-
-  // Global Excel Drag & Drop handlers
+  // Global Excel/JSON Drag & Drop
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     if (e.dataTransfer.types.includes('Files')) {
       e.preventDefault();
-      if (!isDraggingXlsx) setIsDraggingXlsx(true);
+      if (!isDraggingFile) setIsDraggingFile(true);
     }
   };
-
   const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
     if (e.currentTarget.contains(e.relatedTarget as Node)) return;
-    setIsDraggingXlsx(false);
+    setIsDraggingFile(false);
   };
-
   const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
-    setIsDraggingXlsx(false);
+    setIsDraggingFile(false);
     const file = e.dataTransfer.files?.[0];
     if (!file) return;
     if (file.name.match(/\.(xlsx|xls)$/i)) {
@@ -366,6 +389,10 @@ export default function App() {
     }
   };
 
+  const mediaCount = Object.keys(mediaMap).length;
+  const showTimelineBar =
+    dataset && (activeView === 'board' || activeView === 'matrix' || activeView === 'swimlane2d');
+
   return (
     <div
       onDragOver={handleDragOver}
@@ -373,36 +400,40 @@ export default function App() {
       onDrop={handleDrop}
       className="flex h-screen w-screen flex-col overflow-hidden bg-[#F8FAFC] text-slate-900 dark:bg-[#0B1120] dark:text-slate-100"
     >
-      {/* Top Header */}
+      {/* Top Main Toolbar: Multi-View + 3-Stage Detail Depth + Global Presentation/Edit Mode */}
       {report && dataset && (
         <Header
           activeView={activeView}
           onChangeView={setActiveView}
+          appMode={appMode}
+          onChangeAppMode={setAppMode}
+          detailLevel={detailLevel}
+          onChangeDetailLevel={setDetailLevel}
           report={report}
           integrityOpen={integrityOpen}
           onToggleIntegrity={() => setIntegrityOpen((p) => !p)}
           mediaCount={mediaCount}
-          editCount={editCount}
+          changeCount={changeCount}
           onExcelFileSelected={handleExcelFileSelected}
           onJsonBackupImport={handleJsonBackupImport}
           onExportZip={() => {
-            downloadProjectZipPackage(dataset, edits, palette, mediaMap);
+            downloadProjectZipPackage(dataset, palette, mediaMap);
             showToast('ZIP-Projektpaket (XLSX + public/media/) erstellt');
           }}
           onExportXlsx={() => {
-            downloadUpdatedXlsx(dataset, edits, mediaMap);
+            downloadUpdatedXlsx(dataset, createEmptyEdits(), mediaMap);
             showToast('Aktualisierte 13-Blatt .xlsx exportiert');
           }}
           onExportJson={() => {
-            downloadProjectJsonBackup(dataset, edits, palette, mediaMap);
-            showToast('JSON-Projektpaket exportiert');
+            downloadProjectJsonBackup(dataset, palette, mediaMap);
+            showToast('Projektpaket (JSON + Bilder) exportiert');
           }}
+          onResetLocalChanges={handleResetLocalChanges}
           darkMode={darkMode}
           onToggleDarkMode={() => setDarkMode((p) => !p)}
         />
       )}
 
-      {/* Import Error Alert */}
       {importError && (
         <div className="flex items-center justify-between gap-4 border-b border-red-200 bg-red-50 px-4 py-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950/60 dark:text-red-200">
           <span>{importError}</span>
@@ -420,22 +451,27 @@ export default function App() {
       {report && dataset && (
         <IntegrityBanner
           sourceName={dataset.sourceName}
-          isBundledDefault={dataset.isBundledDefault}
+          isBundledDefault={dataset.isBundledDefault && changeCount === 0}
           report={report}
           isExpanded={integrityOpen}
           onToggleExpand={() => setIntegrityOpen((p) => !p)}
-          onReloadDefault={loadBundledDefault}
-          onJumpToRse={(rseId) => setSelectedRseId(rseId)}
+          onReloadDefault={handleResetLocalChanges}
+          onJumpToRse={(rseId) => {
+            setSelectedArrowId(null);
+            setSelectedRseId(rseId);
+          }}
           rseIdSet={rseIdSet}
         />
       )}
 
-      {/* Interactive Version Slider + SGE Color Legend & Filter Bar */}
-      {dataset && (activeView === 'swimlane' || activeView === 'matrix') && (
+      {/* Version Slider & ISEM Color Legend / Filter Bar */}
+      {showTimelineBar && dataset && (
         <VersionTimelineBar
           versions={dataset.versions}
           selectedVersionIndex={selectedVersionIndex}
           onSelectVersionIndex={setSelectedVersionIndex}
+          appMode={appMode}
+          onOpenModal={setModal}
           kpi={versionKpi}
           activeColorFilters={activeColorFilters}
           onToggleColorFilter={handleToggleColorFilter}
@@ -470,26 +506,63 @@ export default function App() {
           </div>
         ) : (
           <>
-            {activeView === 'swimlane' && (
+            {/* View 1: Bestehende Ansicht (Bisheriger Stand – SGE-Karten & Versions-Slider) */}
+            {activeView === 'board' && (
               <SwimlaneBoard
                 dataset={dataset}
                 selectedVersion={selectedVersion}
                 rseStates={rseStates}
+                appMode={appMode}
+                detailLevel={detailLevel}
                 activeColorFilters={activeColorFilters}
                 colorMode={colorMode}
                 palette={palette}
                 searchQuery={searchQuery}
                 selectedRseId={selectedRseId}
                 mediaMap={mediaMap}
-                onSelectRse={(id) =>
-                  setSelectedRseId((prev) => (prev === id ? null : id))
-                }
+                onSelectRse={(id) => {
+                  setSelectedArrowId(null);
+                  setSelectedRseId((prev) => (prev === id ? null : id));
+                }}
+                onQuickStatusChange={handleQuickStatusChange}
+                onOpenModal={setModal}
               />
             )}
 
+            {/* View 2: NEU – 2D-Swimlane-Entwicklungsansicht mit RSE-Zeilen & SVG-Kausalpfeilen */}
+            {activeView === 'swimlane2d' && (
+              <Swimlane2DGraphView
+                dataset={dataset}
+                appMode={appMode}
+                detailLevel={detailLevel}
+                colorMode={colorMode}
+                palette={palette}
+                activeColorFilters={activeColorFilters}
+                searchQuery={searchQuery}
+                darkMode={darkMode}
+                mediaMap={mediaMap}
+                selectedRseId={selectedRseId}
+                selectedArrowId={selectedArrowId}
+                onSelectRse={(id, verIdx) => {
+                  setSelectedArrowId(null);
+                  setSelectedRseId(id);
+                  if (verIdx !== undefined) setSelectedVersionIndex(verIdx);
+                }}
+                onSelectArrow={(arrowId) => {
+                  setSelectedRseId(null);
+                  setSelectedArrowId(arrowId);
+                }}
+                onQuickStatusChange={handleQuickStatusChange}
+                onOpenModal={setModal}
+              />
+            )}
+
+            {/* View 3: SGE-Phasenmatrix, gestapelte SGE-Balkendiagramme & KOMBI-Übersicht */}
             {activeView === 'matrix' && (
               <RseMatrixView
                 dataset={dataset}
+                appMode={appMode}
+                detailLevel={detailLevel}
                 selectedVersionIndex={selectedVersionIndex}
                 selectedVersion={selectedVersion}
                 activeColorFilters={activeColorFilters}
@@ -497,18 +570,13 @@ export default function App() {
                 palette={palette}
                 searchQuery={searchQuery}
                 selectedRseId={selectedRseId}
-                onSelectRse={(id) => setSelectedRseId(id)}
-                onSelectVersionIndex={setSelectedVersionIndex}
-              />
-            )}
-
-            {activeView === 'media' && (
-              <IntegrationsAndMediaView
-                dataset={dataset}
-                palette={palette}
                 mediaMap={mediaMap}
-                onSelectRse={(id) => setSelectedRseId(id)}
-                onEditMicroIteration={handleEditMicroIteration}
+                onSelectRse={(id) => {
+                  setSelectedArrowId(null);
+                  setSelectedRseId(id);
+                }}
+                onSelectVersionIndex={setSelectedVersionIndex}
+                onOpenModal={setModal}
                 onUploadMedia={handleUploadMedia}
                 onUpdateMediaCaption={handleUpdateMediaCaption}
                 onDeleteMedia={handleDeleteMedia}
@@ -516,37 +584,87 @@ export default function App() {
               />
             )}
 
-            {activeView === 'causal' && (
-              <CausalGraphView
+            {/* View 4: Foto-Verwaltung & 20 Platzhalter-Hub */}
+            {activeView === 'media' && (
+              <IntegrationsAndMediaView
                 dataset={dataset}
-                onSelectRse={(id) => setSelectedRseId(id)}
+                appMode={appMode}
+                palette={palette}
+                mediaMap={mediaMap}
+                onSelectRse={(id) => {
+                  setSelectedArrowId(null);
+                  setSelectedRseId(id);
+                }}
+                onEditMicroIteration={(microId, patch) =>
+                  mutateDataset(
+                    (prev) => updateMicroIteration(prev, microId, patch),
+                    `Mikro-Iteration ${microId} aktualisiert`
+                  )
+                }
+                onOpenModal={setModal}
+                onUploadMedia={handleUploadMedia}
+                onUpdateMediaCaption={handleUpdateMediaCaption}
+                onDeleteMedia={handleDeleteMedia}
+                onOpenLightbox={setLightboxItem}
               />
             )}
 
+            {/* View 5: Alle 13 Excel-Tabellen */}
             {activeView === 'tables' && (
               <div className="flex-1 overflow-hidden">
                 <DataTablesView
                   dataset={dataset}
+                  appMode={appMode}
                   palette={palette}
-                  onSelectRse={(id) => setSelectedRseId(id)}
+                  onSelectRse={(id) => {
+                    setSelectedArrowId(null);
+                    setSelectedRseId(id);
+                  }}
+                  onOpenModal={setModal}
                 />
               </div>
             )}
 
-            {/* Split-Drawer RSE Deep-Dive (available across all views!) */}
-            {selectedRseId && (
+            {/* Split-Drawer Deep-Dive (RSE oder Kausalpfeil – in jeder Ansicht erreichbar) */}
+            {(selectedRseId || selectedArrowId) && (
               <RseDeepDiveDrawer
                 rseId={selectedRseId}
+                arrowId={selectedArrowId}
                 dataset={dataset}
                 selectedVersion={selectedVersion}
+                appMode={appMode}
                 colorMode={colorMode}
                 palette={palette}
                 mediaMap={mediaMap}
-                onClose={() => setSelectedRseId(null)}
-                onSelectRse={(id) => setSelectedRseId(id)}
+                onClose={() => {
+                  setSelectedRseId(null);
+                  setSelectedArrowId(null);
+                }}
+                onSelectRse={(id) => {
+                  setSelectedArrowId(null);
+                  setSelectedRseId(id);
+                }}
                 onSelectVersionIndex={setSelectedVersionIndex}
-                onEditEvent={handleEditEvent}
-                onEditMicroIteration={handleEditMicroIteration}
+                onQuickStatusChange={handleQuickStatusChange}
+                onAddMicroIteration={(input) =>
+                  mutateDataset(
+                    (prev) => addMicroIteration(prev, input),
+                    `Mikro-Iteration für ${input.rseId} hinzugefügt`
+                  )
+                }
+                onEditMicroIteration={(microId, patch) =>
+                  mutateDataset(
+                    (prev) => updateMicroIteration(prev, microId, patch),
+                    `Mikro-Iteration ${microId} aktualisiert`
+                  )
+                }
+                onDeleteMicroIteration={(microId) =>
+                  mutateDataset(
+                    (prev) => deleteMicroIteration(prev, microId),
+                    `Mikro-Iteration ${microId} gelöscht`
+                  )
+                }
+                onOpenModal={setModal}
                 onUploadMedia={handleUploadMedia}
                 onUpdateMediaCaption={handleUpdateMediaCaption}
                 onDeleteMedia={handleDeleteMedia}
@@ -557,7 +675,85 @@ export default function App() {
         )}
       </main>
 
-      {/* Lightbox Modal */}
+      {/* Edit / Create Entity Modals */}
+      {dataset && (
+        <EntityEditModals
+          modal={modal}
+          dataset={dataset}
+          palette={palette}
+          onClose={() => setModal(null)}
+          onAddRse={(input) => {
+            let createdId = '';
+            mutateDataset((prev) => {
+              const res = addRse(prev, input);
+              createdId = res.createdRseId;
+              return res.dataset;
+            }, 'Neues RSE angelegt');
+            if (createdId) setSelectedRseId(createdId);
+          }}
+          onUpdateRse={(rseId, patch) =>
+            mutateDataset((prev) => updateRse(prev, rseId, patch), `RSE ${rseId} gespeichert`)
+          }
+          onDeleteRse={(rseId) => {
+            mutateDataset((prev) => deleteRse(prev, rseId), `RSE ${rseId} gelöscht`);
+            if (selectedRseId === rseId) setSelectedRseId(null);
+          }}
+          onUpsertEvent={(input) =>
+            mutateDataset(
+              (prev) => upsertRseEvent(prev, input),
+              `Event für ${input.rseId} (${input.versionKey}) gespeichert`
+            )
+          }
+          onDeleteEvent={(eventId) =>
+            mutateDataset((prev) => deleteRseEvent(prev, eventId), `Event ${eventId} gelöscht`)
+          }
+          onUpsertArrow={(input) =>
+            mutateDataset(
+              (prev) => upsertArrow(prev, input),
+              `Wirkpfeil ${input.fromRseId} → ${input.toRseId} gespeichert`
+            )
+          }
+          onDeleteArrow={(arrowId) => {
+            mutateDataset((prev) => deleteArrow(prev, arrowId), `Wirkpfeil ${arrowId} gelöscht`);
+            if (selectedArrowId === arrowId) setSelectedArrowId(null);
+          }}
+          onUpsertKombi={(input) =>
+            mutateDataset((prev) => upsertKombi(prev, input), 'Bauteil-Integration gespeichert')
+          }
+          onDeleteKombi={(kombiId) =>
+            mutateDataset((prev) => deleteKombi(prev, kombiId), `${kombiId} gelöscht`)
+          }
+          onUpsertCause={(input, attachToEventId) =>
+            mutateDataset(
+              (prev) => upsertCause(prev, input, attachToEventId),
+              'Ursache / Befund gespeichert'
+            )
+          }
+          onDeleteCause={(causeId) =>
+            mutateDataset((prev) => deleteCause(prev, causeId), `Ursache ${causeId} gelöscht`)
+          }
+          onUpsertLearning={(input) =>
+            mutateDataset((prev) => upsertLearning(prev, input), 'Methodik-Learning gespeichert')
+          }
+          onDeleteLearning={(learningId) =>
+            mutateDataset(
+              (prev) => deleteLearning(prev, learningId),
+              `Learning ${learningId} gelöscht`
+            )
+          }
+          onUpdateSpur={(spurId, patch) =>
+            mutateDataset((prev) => updateSpur(prev, spurId, patch), `Spur ${spurId} gespeichert`)
+          }
+          onUpdateVersion={(versionKey, patch) =>
+            mutateDataset(
+              (prev) => updateVersionConfig(prev, versionKey, patch),
+              `Version ${versionKey} gespeichert`
+            )
+          }
+        />
+      )}
+
+      {/* Full-screen Lightbox */}
       <LightboxModal item={lightboxItem} onClose={() => setLightboxItem(null)} />
 
       {/* Toast Notification */}
@@ -567,17 +763,16 @@ export default function App() {
         </div>
       )}
 
-      {/* Global Excel Drag & Drop Overlay */}
-      {isDraggingXlsx && (
+      {/* Global Drag & Drop Overlay */}
+      {isDraggingFile && (
         <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 backdrop-blur-[2px]">
           <div className="flex flex-col items-center rounded-xl border-2 border-dashed border-blue-500 bg-white px-10 py-8 text-center shadow-2xl dark:border-blue-400 dark:bg-slate-900">
             <Upload className="h-9 w-9 text-blue-600 dark:text-blue-400" />
             <p className="mt-3 text-base font-semibold text-slate-900 dark:text-slate-100">
-              Duckomat v14 Excel-Datenbank (.xlsx) oder JSON-Backup ablegen
+              Duckomat v14 Excel (.xlsx) oder Projektpaket (.json) ablegen
             </p>
             <p className="mt-1 max-w-md text-xs text-slate-500 dark:text-slate-400">
-              Liest alle 13 SGE-Tabellenblätter inkl. RSE_Stammdaten, RSE_Phasenwechsel,
-              RSE_Phasenmatrix, Bauteil_Integrationen & Mikro_Iterationen automatisch ein
+              Liest alle 13 SGE-Tabellenblätter automatisch aus und prüft Fremdschlüssel-Integrität
             </p>
           </div>
         </div>
