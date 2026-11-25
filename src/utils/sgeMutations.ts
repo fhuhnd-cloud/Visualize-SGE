@@ -13,7 +13,7 @@ import {
   SpurDashboardRow,
   StatusCode,
 } from '../types/sge';
-import { classifyArrowType, parseIdList } from './excelParser';
+import { classifyArrowType, isPlaceholderMicroIteration, parseIdList } from './excelParser';
 import {
   derivePlanningCategoryFromStatus,
   deriveVariationTypeFromStatus,
@@ -34,8 +34,11 @@ export function reconcileDerivedFields(dataset: SgeDataset): SgeDataset {
     list.sort((a, b) => a.versionNr - b.versionNr || a.rowIndex - b.rowIndex);
   }
 
+  const cleanMicroIterations = dataset.microIterations.filter(
+    (m) => !isPlaceholderMicroIteration(m)
+  );
   const microCountByRse = new Map<string, number>();
-  for (const m of dataset.microIterations) {
+  for (const m of cleanMicroIterations) {
     if (m.rseId) {
       microCountByRse.set(m.rseId, (microCountByRse.get(m.rseId) ?? 0) + 1);
     }
@@ -147,7 +150,7 @@ export function reconcileDerivedFields(dataset: SgeDataset): SgeDataset {
         removedOrReplaced: dashboard.reduce((s, d) => s + d.removedOrReplaced, 0),
         integratedRse: dashboard.reduce((s, d) => s + d.integratedRse, 0),
         versionEventsCount: dataset.events.length,
-        microIterationsCount: dataset.microIterations.length,
+        microIterationsCount: cleanMicroIterations.length,
       }
     : null;
 
@@ -155,6 +158,7 @@ export function reconcileDerivedFields(dataset: SgeDataset): SgeDataset {
     ...dataset,
     rseList,
     matrix,
+    microIterations: cleanMicroIterations,
     dashboard,
     dashboardTotal,
   };
@@ -446,6 +450,46 @@ export function deleteRseEvent(dataset: SgeDataset, eventId: string): SgeDataset
   return reconcileDerivedFields({ ...dataset, events });
 }
 
+/**
+ * Sets or clears Medien_Ref on the RSE_Phasenwechsel event at (rseId, versionKey).
+ * If no explicit event exists yet (e.g. virtual Carry-Over tile), creates one automatically
+ * so Medien_Ref is persisted in IndexedDB and written out on .xlsx export.
+ */
+export function setNodeEventMediaRef(
+  dataset: SgeDataset,
+  rseId: string,
+  versionKey: string,
+  mediaRef: string
+): SgeDataset {
+  const rse = dataset.rseList.find((r) => r.rseId === rseId);
+  const ver = dataset.versions.find((v) => v.versionKey === versionKey);
+  if (!rse || !ver) return dataset;
+
+  const existing = dataset.events.find(
+    (e) => e.rseId === rseId && e.versionNr === ver.sortOrder
+  );
+
+  if (existing) {
+    const events = dataset.events.map((e) =>
+      e.eventId === existing.eventId ? { ...e, mediaRef } : e
+    );
+    return { ...dataset, events };
+  }
+
+  if (!mediaRef) return dataset;
+
+  const matStatus =
+    dataset.matrix.find((m) => m.rseId === rseId)?.statusByVersionKey[versionKey] || 'CV';
+
+  return upsertRseEvent(dataset, {
+    rseId,
+    versionKey,
+    statusCode: matStatus,
+    stateDescription: rse.functionSummary || `${rse.name} (${matStatus})`,
+    mediaRef,
+  });
+}
+
 // --- MICRO-ITERATION CRUD ---
 export function addMicroIteration(
   dataset: SgeDataset,
@@ -580,6 +624,13 @@ export function deleteKombi(dataset: SgeDataset, kombiId: string): SgeDataset {
 }
 
 // --- CAUSAL ARROW (Verbindungen_Pfeile) CRUD ---
+function deriveDefaultStatusForArrow(arrowType: string): StatusCode {
+  const cat = classifyArrowType(arrowType);
+  if (cat === 'paradigmShift' || cat === 'transfer') return 'EC-PV';
+  if (cat === 'bugfix') return 'UD-GV';
+  return 'EC-GV';
+}
+
 export function upsertArrow(
   dataset: SgeDataset,
   input: {
@@ -591,6 +642,7 @@ export function upsertArrow(
     arrowType: string;
     causeIdRaw: string;
     rationale: string;
+    targetStatusCode?: StatusCode;
   }
 ): SgeDataset {
   const fromVer = dataset.versions.find((v) => v.versionKey === input.fromVersionKey);
@@ -616,7 +668,7 @@ export function upsertArrow(
       versionNr: ver?.sortOrder ?? 1,
       stepType: 'Bearbeitet',
       title: `${rseId}: ${rseName}`,
-      implementation: '',
+      implementation: input.rationale || '',
       stand: 'Zwischenstand',
       detailBox: '',
       learnings: [],
@@ -626,8 +678,9 @@ export function upsertArrow(
     return newStepId;
   };
 
-  const fromStepId = findOrCreateStep(input.fromRseId, fromVer, fromRse?.spur ?? 'S1_Rahmen_Peripherie');
-  const toStepId = findOrCreateStep(input.toRseId, toVer, toRse?.spur ?? 'S1_Rahmen_Peripherie');
+  const fallbackSpur = dataset.lanes[0] || 'S1_Rahmen_Peripherie';
+  const fromStepId = findOrCreateStep(input.fromRseId, fromVer, fromRse?.spur ?? fallbackSpur);
+  const toStepId = findOrCreateStep(input.toRseId, toVer, toRse?.spur ?? fallbackSpur);
 
   const arrowId = input.id?.trim() || generateNextId(dataset.arrows.map((a) => a.id), 'P_', 2);
   const exists = dataset.arrows.some((a) => a.id === arrowId);
@@ -659,7 +712,64 @@ export function upsertArrow(
     ? dataset.arrows.map((a) => (a.id === arrowId ? { ...nextArrow, rowIndex: a.rowIndex } : a))
     : [...dataset.arrows, nextArrow];
 
-  return { ...dataset, steps, arrows };
+  // Auto-create missing RSE_Phasenwechsel tiles at target (and source if missing) so the
+  // arrow immediately renders in the 2D Swimlane SVG overlay with valid foreign keys.
+  let events = [...dataset.events];
+  const ensureTileEvent = (
+    rse: RseMaster | undefined,
+    ver: PhaseVersionConfig | undefined,
+    stepId: string,
+    preferredStatus: StatusCode,
+    includeDetails: boolean
+  ) => {
+    if (!rse || !ver) return;
+    const hasEvent = events.some((e) => e.rseId === rse.rseId && e.versionNr === ver.sortOrder);
+    if (hasEvent) return;
+    const matStatus = dataset.matrix.find((m) => m.rseId === rse.rseId)?.statusByVersionKey[
+      ver.versionKey
+    ];
+    // For source node, only create if matrix cell is completely empty (not already rendered as CV)
+    if (!includeDetails && matStatus) return;
+    // For target node, always create an explicit event if missing so it renders even if previously empty or CV-only
+    const newEvId = generateNextId(events.map((e) => e.eventId), 'EV', 3);
+    const causeRaw = includeDetails ? input.causeIdRaw : '';
+    const newEv: RsePhaseEvent = {
+      eventId: newEvId,
+      rseId: rse.rseId,
+      spur: rse.spur,
+      version: ver.phaseName,
+      versionNr: ver.sortOrder,
+      lookupKey: `${rse.rseId}|${ver.sortOrder}`,
+      statusCode: preferredStatus,
+      planningCategoryFig2: derivePlanningCategoryFromStatus(preferredStatus),
+      variationType: deriveVariationTypeFromStatus(preferredStatus),
+      kombiPartIdRaw: '',
+      kombiPartIds: [],
+      stateDescription:
+        (includeDetails && input.rationale.trim()) ||
+        rse.functionSummary ||
+        `${rse.name} (${preferredStatus})`,
+      rationale: includeDetails ? input.rationale : '',
+      causeIdRaw: causeRaw,
+      causeIds: parseIdList(causeRaw),
+      stepIdRaw: stepId,
+      stepIds: [stepId],
+      reviewStatus: 'Bearbeitet',
+      mediaRef: '',
+      rowIndex: events.length + 2,
+    };
+    events = [...events, newEv];
+  };
+
+  if (!exists) {
+    const sourceFallbackStatus: StatusCode = fromVer?.sortOrder === 1 ? 'BASE' : 'NEW';
+    const targetStatus: StatusCode =
+      input.targetStatusCode ?? deriveDefaultStatusForArrow(input.arrowType);
+    ensureTileEvent(fromRse, fromVer, fromStepId, sourceFallbackStatus, false);
+    ensureTileEvent(toRse, toVer, toStepId, targetStatus, true);
+  }
+
+  return reconcileDerivedFields({ ...dataset, steps, arrows, events });
 }
 
 export function deleteArrow(dataset: SgeDataset, arrowId: string): SgeDataset {

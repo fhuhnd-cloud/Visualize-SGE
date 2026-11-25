@@ -156,7 +156,11 @@ export const RseMatrixView: React.FC<RseMatrixViewProps> = ({
           <div>
             <h2 className="flex items-center gap-2 text-sm font-bold text-slate-900 dark:text-white">
               <BarChart3 className="h-4 w-4 text-blue-600 dark:text-blue-400" />
-              <span>SGE-Kennzahlen & Gestapelte Versions-Auswertung (v0.0 – v2.2)</span>
+              <span>
+                SGE-Kennzahlen &amp; Gestapelte Versions-Auswertung (
+                {dataset.versions[0]?.versionKey ?? 'v0.0'} –{' '}
+                {dataset.versions[dataset.versions.length - 1]?.versionKey ?? 'v2.2'})
+              </span>
             </h2>
             <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
               Verteilung der ISEM-Kategorien, Carryover-Quote (CV) und Ungeplant-Quote (UD) je
@@ -186,7 +190,12 @@ export const RseMatrixView: React.FC<RseMatrixViewProps> = ({
         {/* Stacked Bars Grid */}
         <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-12">
           <div className="lg:col-span-8">
-            <div className="grid grid-cols-7 items-end gap-2 sm:gap-3 pt-2">
+            <div
+              style={{
+                gridTemplateColumns: `repeat(${Math.max(1, dataset.versions.length)}, minmax(0, 1fr))`,
+              }}
+              className="grid items-end gap-2 sm:gap-3 pt-2"
+            >
               {dataset.versions.map((ver, idx) => {
                 const kpi = kpisByVersionKey.get(ver.versionKey);
                 if (!kpi) return null;

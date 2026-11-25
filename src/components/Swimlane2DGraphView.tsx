@@ -9,6 +9,7 @@ import {
   Flag,
   FlaskConical,
   GitBranch,
+  ImagePlus,
   Lightbulb,
   Link2,
   Maximize2,
@@ -16,6 +17,8 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
+  Trash2,
+  ZoomIn,
 } from 'lucide-react';
 import {
   AppMode,
@@ -44,6 +47,7 @@ import {
 } from '../utils/sgeVisualConfig';
 import { ModalState } from './EntityEditModals';
 import { HoverTooltip, HoverTooltipData } from './HoverTooltip';
+import { LightboxPayload } from './LightboxModal';
 
 interface Swimlane2DGraphViewProps {
   dataset: SgeDataset;
@@ -61,6 +65,9 @@ interface Swimlane2DGraphViewProps {
   onSelectArrow: (arrowId: string) => void;
   onQuickStatusChange: (rseId: string, versionKey: string, nextStatus: StatusCode) => void;
   onOpenModal: (modal: ModalState) => void;
+  onUploadNodeMedia: (rseId: string, versionKey: string, file: File) => void;
+  onDeleteNodeMedia: (rseId: string, versionKey: string, refKey: string) => void;
+  onOpenLightbox: (payload: LightboxPayload) => void;
 }
 
 interface BoxRect {
@@ -114,10 +121,16 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
   onSelectArrow,
   onQuickStatusChange,
   onOpenModal,
+  onUploadNodeMedia,
+  onDeleteNodeMedia,
+  onOpenLightbox,
 }) => {
   const isEdit = appMode === 'edit';
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const tileFileInputRef = useRef<HTMLInputElement>(null);
+  const photoTargetRef = useRef<{ rseId: string; versionKey: string } | null>(null);
+  const [dragOverNodeKey, setDragOverNodeKey] = useState<string | null>(null);
 
   // Collapsible swimlanes (all 9 lanes expanded by default, user can collapse any lane)
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(new Set());
@@ -208,7 +221,28 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
     return byLane;
   }, [dataset.lanes, dataset.rseList, searchQuery]);
 
-  // Resolve all 50 causal arrows onto (RSE_ID, Version_Key) node keys
+  // Track all existing same-RSE arrow connections regardless of type filters (for gap hover trigger)
+  const connectedSameRsePairs = useMemo(() => {
+    const stepMap = new Map(dataset.steps.map((s) => [s.id, s]));
+    const set = new Set<string>();
+    for (const arrow of dataset.arrows) {
+      const sFrom = stepMap.get(arrow.from);
+      const sTo = stepMap.get(arrow.to);
+      const fromRseId = arrow.fromRseId || sFrom?.rseIds[0] || '';
+      const toRseId = arrow.toRseId || sTo?.rseIds[0] || '';
+      const fromVerKey =
+        arrow.fromVersionKey || (sFrom?.versionNr ? versionKeyByNr.get(sFrom.versionNr) : '') || '';
+      const toVerKey =
+        arrow.toVersionKey || (sTo?.versionNr ? versionKeyByNr.get(sTo.versionNr) : '') || '';
+      if (fromRseId && toRseId && fromRseId === toRseId && fromVerKey && toVerKey) {
+        set.add(`${fromRseId}::${fromVerKey}::${toVerKey}`);
+        set.add(`${fromRseId}::${toVerKey}::${fromVerKey}`);
+      }
+    }
+    return set;
+  }, [dataset.arrows, dataset.steps, versionKeyByNr]);
+
+  // Resolve all causal arrows onto (RSE_ID, Version_Key) node keys
   const resolvedArrows = useMemo<ResolvedArrow[]>(() => {
     const stepMap = new Map(dataset.steps.map((s) => [s.id, s]));
     const list: ResolvedArrow[] = [];
@@ -294,7 +328,7 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
   useLayoutEffect(() => {
     const raf = requestAnimationFrame(measureBoxes);
     return () => cancelAnimationFrame(raf);
-  }, [measureBoxes, dataset, collapsedLanes, detailLevel, onlyChangeEvents, searchQuery, isEdit]);
+  }, [measureBoxes, dataset, collapsedLanes, detailLevel, onlyChangeEvents, searchQuery, isEdit, mediaMap]);
 
   useEffect(() => {
     const contentEl = contentRef.current;
@@ -425,15 +459,75 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
   const colWidthPx = detailLevel === 3 ? 255 : detailLevel === 2 ? 210 : 172;
   const gridTemplateColumns = `220px repeat(${dataset.versions.length}, ${colWidthPx}px)`;
 
-  const getMediaPreview = (ev: RsePhaseEvent | undefined, rseId: string): string | undefined => {
-    if (ev?.mediaRef && mediaMap[ev.mediaRef]?.dataUrl) return mediaMap[ev.mediaRef].dataUrl;
-    if (ev && mediaMap[`event:${ev.eventId}`]?.dataUrl) return mediaMap[`event:${ev.eventId}`].dataUrl;
-    if (mediaMap[`rse:${rseId}`]?.dataUrl) return mediaMap[`rse:${rseId}`].dataUrl;
-    return undefined;
+  const getNodeMediaInfo = (
+    ev: RsePhaseEvent | undefined,
+    rseId: string
+  ): {
+    nodeAttachment?: MediaAttachment;
+    nodeRefKey?: string;
+    previewUrl?: string;
+  } => {
+    if (ev?.mediaRef && mediaMap[ev.mediaRef]?.dataUrl) {
+      return {
+        nodeAttachment: mediaMap[ev.mediaRef],
+        nodeRefKey: ev.mediaRef,
+        previewUrl: mediaMap[ev.mediaRef].dataUrl,
+      };
+    }
+    if (ev && mediaMap[`event:${ev.eventId}`]?.dataUrl) {
+      return {
+        nodeAttachment: mediaMap[`event:${ev.eventId}`],
+        nodeRefKey: `event:${ev.eventId}`,
+        previewUrl: mediaMap[`event:${ev.eventId}`].dataUrl,
+      };
+    }
+    if (mediaMap[`rse:${rseId}`]?.dataUrl) {
+      return {
+        previewUrl: mediaMap[`rse:${rseId}`].dataUrl,
+      };
+    }
+    return {};
+  };
+
+  const triggerTilePhotoPicker = (rseId: string, versionKey: string) => {
+    photoTargetRef.current = { rseId, versionKey };
+    tileFileInputRef.current?.click();
+  };
+
+  const handleTileImageDrop = (
+    e: React.DragEvent,
+    rseId: string,
+    versionKey: string
+  ) => {
+    if (!isEdit) return;
+    const files = e.dataTransfer.files;
+    if (!files || files.length === 0) return;
+    const file = files[0];
+    if (!file.type.match(/^image\/(png|jpeg|jpg|webp)$/i)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOverNodeKey(null);
+    onUploadNodeMedia(rseId, versionKey, file);
   };
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden bg-[#F8FAFC] dark:bg-[#0B1120]">
+      {isEdit && (
+        <input
+          ref={tileFileInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            const target = photoTargetRef.current;
+            if (file && target && file.type.match(/^image\/(png|jpeg|jpg|webp)$/i)) {
+              onUploadNodeMedia(target.rseId, target.versionKey, file);
+            }
+            e.target.value = '';
+          }}
+        />
+      )}
       {/* 2D Graph Controls & Arrow Legend Bar */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-4 py-2 text-xs dark:border-slate-800 dark:bg-slate-900">
         {/* Left: Arrow Toggle + Legend Filter Pills */}
@@ -912,22 +1006,76 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                               )}
                             </div>
 
-                            {/* Version Cells (v0.0 .. v2.2) */}
+                            {/* Version Cells (v0.0 .. latest) */}
                             {dataset.versions.map((ver, verIdx) => {
                               const nodeKey = `${rse.rseId}::${ver.versionKey}`;
                               const statusCode = matRow?.statusByVersionKey[ver.versionKey] ?? '';
                               const ev = eventByNodeKey.get(nodeKey);
                               const micros = microByNodeKey.get(nodeKey) ?? [];
-                              const hasPhoto = Boolean(getMediaPreview(ev, rse.rseId));
+                              const mediaInfo = getNodeMediaInfo(ev, rse.rseId);
+                              const hasPhoto = Boolean(mediaInfo.previewUrl);
 
                               const shouldHideCv =
                                 onlyChangeEvents && statusCode === 'CV' && !ev;
+                              const leftHasTile = Boolean(statusCode) && !shouldHideCv;
+
+                              // Check adjacent right version for gap hover arrow trigger
+                              const nextVer =
+                                verIdx < dataset.versions.length - 1
+                                  ? dataset.versions[verIdx + 1]
+                                  : undefined;
+                              const rightStatusCode = nextVer
+                                ? matRow?.statusByVersionKey[nextVer.versionKey] ?? ''
+                                : '';
+                              const rightEv = nextVer
+                                ? eventByNodeKey.get(`${rse.rseId}::${nextVer.versionKey}`)
+                                : undefined;
+                              const rightHasTile =
+                                Boolean(rightStatusCode) &&
+                                !(onlyChangeEvents && rightStatusCode === 'CV' && !rightEv);
+                              const hasArrowToNext = nextVer
+                                ? connectedSameRsePairs.has(
+                                    `${rse.rseId}::${ver.versionKey}::${nextVer.versionKey}`
+                                  )
+                                : true;
+                              const showGapTrigger =
+                                isEdit &&
+                                Boolean(nextVer) &&
+                                (leftHasTile || rightHasTile) &&
+                                !hasArrowToNext;
+
+                              const gapTriggerEl = showGapTrigger && nextVer ? (
+                                <div
+                                  data-interactive-node="true"
+                                  className="group/gap absolute -right-4 bottom-0 top-0 z-30 flex w-8 items-center justify-center"
+                                >
+                                  <button
+                                    type="button"
+                                    data-interactive-node="true"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onOpenModal({
+                                        kind: 'upsert-arrow',
+                                        defaultFromRse: rse.rseId,
+                                        defaultFromVer: ver.versionKey,
+                                        defaultToRse: rse.rseId,
+                                        defaultToVer: nextVer.versionKey,
+                                      });
+                                    }}
+                                    title={`+ Kausalpfeil / Schritt hinzufügen (${rse.rseId}: ${ver.versionKey} → ${nextVer.versionKey})`}
+                                    aria-label={`Kausalpfeil zwischen ${ver.versionKey} und ${nextVer.versionKey} für ${rse.rseId} hinzufügen`}
+                                    className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-dashed border-violet-400 bg-white/95 text-violet-600 opacity-0 shadow-sm transition-all duration-150 hover:scale-110 hover:border-solid hover:border-violet-600 hover:bg-violet-600 hover:text-white focus:opacity-100 group-hover/gap:opacity-100 dark:border-violet-500 dark:bg-slate-900 dark:text-violet-300 dark:hover:bg-violet-600 dark:hover:text-white"
+                                  >
+                                    <Plus className="h-3.5 w-3.5" />
+                                  </button>
+                                </div>
+                              ) : null;
 
                               if (!statusCode || shouldHideCv) {
                                 return (
                                   <div
                                     key={ver.versionKey}
-                                    className="group/cell flex items-center justify-center border-r border-slate-100 p-1.5 last:border-r-0 dark:border-slate-800/70"
+                                    className="group/cell relative flex items-center justify-center border-r border-slate-100 p-1.5 last:border-r-0 dark:border-slate-800/70"
                                   >
                                     {isEdit && (
                                       <button
@@ -946,6 +1094,7 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                                         <Plus className="h-3.5 w-3.5" />
                                       </button>
                                     )}
+                                    {gapTriggerEl}
                                   </div>
                                 );
                               }
@@ -967,11 +1116,15 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                               const isCvGhost = statusCode === 'CV' && !ev;
                               const linkedCauses = ev ? getCausesForEvent(ev, dataset) : [];
                               const linkedLearnings = ev ? getLearningsForEvent(ev, dataset) : [];
+                              const isDragOverTile = dragOverNodeKey === nodeKey;
+                              const tileThumbUrl =
+                                mediaInfo.nodeAttachment?.dataUrl ||
+                                (detailLevel === 3 ? mediaInfo.previewUrl : undefined);
 
                               return (
                                 <div
                                   key={ver.versionKey}
-                                  className="flex items-center border-r border-slate-100 px-2.5 py-2 last:border-r-0 dark:border-slate-800/70"
+                                  className="relative flex items-center border-r border-slate-100 px-2.5 py-2 last:border-r-0 dark:border-slate-800/70"
                                 >
                                   <div
                                     data-node-key={nodeKey}
@@ -985,6 +1138,20 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                                         onSelectRse(rse.rseId, verIdx);
                                       }
                                     }}
+                                    onDragOver={(e) => {
+                                      if (!isEdit) return;
+                                      if (e.dataTransfer.types.includes('Files')) {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        if (dragOverNodeKey !== nodeKey) setDragOverNodeKey(nodeKey);
+                                      }
+                                    }}
+                                    onDragLeave={(e) => {
+                                      if (!isEdit) return;
+                                      e.stopPropagation();
+                                      if (dragOverNodeKey === nodeKey) setDragOverNodeKey(null);
+                                    }}
+                                    onDrop={(e) => handleTileImageDrop(e, rse.rseId, ver.versionKey)}
                                     onMouseEnter={(e) => {
                                       setHoveredNodeKey(nodeKey);
                                       const firstCause = linkedCauses[0];
@@ -1000,7 +1167,7 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                                         causeLabel: firstCause
                                           ? `${firstCause.id}: ${firstCause.title}`
                                           : undefined,
-                                        previewImageUrl: getMediaPreview(ev, rse.rseId),
+                                        previewImageUrl: mediaInfo.previewUrl,
                                       });
                                     }}
                                     onMouseMove={(e) => {
@@ -1014,16 +1181,22 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                                     }}
                                     style={{
                                       backgroundColor: sw.bg,
-                                      borderColor: sw.border,
+                                      borderColor: isDragOverTile ? '#2563EB' : sw.border,
                                       color: sw.text,
-                                      borderStyle: sw.dashed ? 'dashed' : 'solid',
+                                      borderStyle: isDragOverTile
+                                        ? 'dashed'
+                                        : sw.dashed
+                                          ? 'dashed'
+                                          : 'solid',
                                     }}
                                     className={`relative z-10 w-full cursor-pointer rounded-lg border-2 px-2 py-1.5 text-left transition-all ${
                                       isCvGhost ? 'opacity-75 hover:opacity-100' : 'shadow-2xs'
                                     } ${!matchesFilter ? 'opacity-20 hover:opacity-80' : ''} ${
-                                      hoveredNodeKey === nodeKey
-                                        ? 'ring-2 ring-slate-900 dark:ring-white'
-                                        : ''
+                                      isDragOverTile
+                                        ? 'ring-2 ring-blue-500 ring-offset-1'
+                                        : hoveredNodeKey === nodeKey
+                                          ? 'ring-2 ring-slate-900 dark:ring-white'
+                                          : ''
                                     }`}
                                   >
                                     {/* Top Row: Status Code (or Quick Picker in Edit Mode) + Icons */}
@@ -1080,13 +1253,39 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                                             {micros.length}
                                           </span>
                                         )}
-                                        {hasPhoto && (
-                                          <span
-                                            title="Foto hinterlegt"
-                                            className="inline-flex items-center rounded bg-white/80 p-0.5 text-slate-700"
+                                        {isEdit ? (
+                                          <button
+                                            type="button"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              triggerTilePhotoPicker(rse.rseId, ver.versionKey);
+                                            }}
+                                            title={
+                                              mediaInfo.nodeAttachment
+                                                ? 'Kachel-Foto austauschen (oder per Drag & Drop)'
+                                                : 'Foto direkt auf diese Kachel hochladen (Klick oder Drag & Drop)'
+                                            }
+                                            className={`inline-flex items-center rounded p-0.5 transition-colors ${
+                                              mediaInfo.nodeAttachment
+                                                ? 'bg-blue-600 text-white hover:bg-blue-700'
+                                                : 'bg-white/80 text-slate-700 hover:bg-white hover:text-blue-600'
+                                            }`}
                                           >
-                                            <Camera className="h-2.5 w-2.5" />
-                                          </span>
+                                            {mediaInfo.nodeAttachment ? (
+                                              <Camera className="h-2.5 w-2.5" />
+                                            ) : (
+                                              <ImagePlus className="h-2.5 w-2.5" />
+                                            )}
+                                          </button>
+                                        ) : (
+                                          hasPhoto && (
+                                            <span
+                                              title="Foto hinterlegt"
+                                              className="inline-flex items-center rounded bg-white/80 p-0.5 text-slate-700"
+                                            >
+                                              <Camera className="h-2.5 w-2.5" />
+                                            </span>
+                                          )
                                         )}
                                         {isEdit && (
                                           <button
@@ -1116,7 +1315,7 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                                       </p>
                                     )}
 
-                                    {/* Stufe 3 (Deep Dive): Inline Causes, Micro-Iterations, Learnings & Photo */}
+                                    {/* Stufe 3 (Deep Dive): Inline Causes, Micro-Iterations & Learnings */}
                                     {detailLevel === 3 && (
                                       <div className="mt-1.5 space-y-1 border-t border-black/10 pt-1 text-[10px]">
                                         {linkedCauses.length > 0 && (
@@ -1154,16 +1353,94 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                                             ))}
                                           </div>
                                         )}
-                                        {getMediaPreview(ev, rse.rseId) && (
-                                          <img
-                                            src={getMediaPreview(ev, rse.rseId)}
-                                            alt={rse.name}
-                                            className="mt-1 h-16 w-full rounded object-cover"
-                                          />
-                                        )}
                                       </div>
                                     )}
+
+                                    {/* Aspect-Ratio-Preserved Node Photo Preview & Quick Edit Controls */}
+                                    {tileThumbUrl && (
+                                      <div
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="group/img relative mt-1.5 flex items-center justify-center overflow-hidden rounded border border-black/10 bg-white/80 p-0.5"
+                                      >
+                                        <img
+                                          src={tileThumbUrl}
+                                          alt={mediaInfo.nodeAttachment?.caption || rse.name}
+                                          onClick={() =>
+                                            onOpenLightbox({
+                                              src: tileThumbUrl,
+                                              title: `${rse.rseId} (${ver.versionKey}) · ${rse.name}`,
+                                              caption: mediaInfo.nodeAttachment?.caption || undefined,
+                                              refPath: ev?.mediaRef || mediaInfo.nodeRefKey,
+                                            })
+                                          }
+                                          className="mx-auto block max-h-24 w-auto max-w-full cursor-zoom-in rounded-xs object-contain"
+                                        />
+                                        <div className="absolute right-1 top-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/img:opacity-100">
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              onOpenLightbox({
+                                                src: tileThumbUrl,
+                                                title: `${rse.rseId} (${ver.versionKey}) · ${rse.name}`,
+                                                caption: mediaInfo.nodeAttachment?.caption || undefined,
+                                                refPath: ev?.mediaRef || mediaInfo.nodeRefKey,
+                                              })
+                                            }
+                                            title="Vergrößern"
+                                            className="inline-flex h-5 w-5 items-center justify-center rounded bg-slate-900/80 text-white hover:bg-slate-900"
+                                          >
+                                            <ZoomIn className="h-2.5 w-2.5" />
+                                          </button>
+                                          {isEdit && (
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                triggerTilePhotoPicker(rse.rseId, ver.versionKey)
+                                              }
+                                              title="Foto austauschen"
+                                              className="inline-flex h-5 w-5 items-center justify-center rounded bg-slate-900/80 text-white hover:bg-slate-900"
+                                            >
+                                              <Camera className="h-2.5 w-2.5" />
+                                            </button>
+                                          )}
+                                          {isEdit && mediaInfo.nodeRefKey && (
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                if (window.confirm('Foto von dieser Kachel entfernen?')) {
+                                                  onDeleteNodeMedia(
+                                                    rse.rseId,
+                                                    ver.versionKey,
+                                                    mediaInfo.nodeRefKey!
+                                                  );
+                                                }
+                                              }}
+                                              title="Foto entfernen"
+                                              className="inline-flex h-5 w-5 items-center justify-center rounded bg-red-600/90 text-white hover:bg-red-700"
+                                            >
+                                              <Trash2 className="h-2.5 w-2.5" />
+                                            </button>
+                                          )}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Compact Upload Dropzone Hint in Edit Mode when no node photo yet (Stufe 2+) */}
+                                    {isEdit && !mediaInfo.nodeAttachment && detailLevel >= 2 && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          triggerTilePhotoPicker(rse.rseId, ver.versionKey);
+                                        }}
+                                        className="mt-1.5 flex w-full items-center justify-center gap-1 rounded border border-dashed border-black/20 bg-white/55 px-1.5 py-1 text-[9px] font-medium text-slate-700 transition-colors hover:border-blue-500 hover:bg-white/90 hover:text-blue-700"
+                                      >
+                                        <ImagePlus className="h-2.5 w-2.5 shrink-0" />
+                                        <span>Foto ablegen / wählen</span>
+                                      </button>
+                                    )}
                                   </div>
+                                  {gapTriggerEl}
                                 </div>
                               );
                             })}

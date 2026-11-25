@@ -125,18 +125,51 @@ export function classifyArrowType(rawType: string): EdgeCategory {
   return 'optimization';
 }
 
-export function resolveCanonicalLane(rawSpur: string): string {
+export function isPlaceholderMicroIteration(item: {
+  detailBox?: string;
+  subVersionId?: string;
+  change?: string;
+  evaluation?: string;
+}): boolean {
+  const detailBox = (item.detailBox ?? '').trim();
+  const subVersionId = (item.subVersionId ?? '').trim();
+  const change = (item.change ?? '').trim();
+  const evaluation = (item.evaluation ?? '').trim();
+  return (
+    detailBox.toUpperCase().startsWith('BOX PH_') ||
+    /^(RH|MH|BV|BH)_\d+$/i.test(subVersionId) ||
+    evaluation.toLowerCase() === 'platzhalter (foto & text)' ||
+    evaluation.toLowerCase().includes('platzhalter') ||
+    change.toLowerCase().startsWith('[platzhalter')
+  );
+}
+
+export function resolveCanonicalLane(rawSpur: string, knownLanes: string[] = []): string {
   const trimmed = rawSpur.trim();
-  if (!trimmed) return 'S1_Rahmen_Peripherie';
+  if (!trimmed) return knownLanes[0] || 'S1_Rahmen_Peripherie';
   const norm = normalizeKey(trimmed);
+
+  // First match against project-specific lanes declared in Überblick_Dashboard
+  for (const lane of knownLanes) {
+    if (lane === trimmed || normalizeKey(lane) === norm) {
+      return lane;
+    }
+  }
+  const bareCodeMatch = trimmed.match(/^(S\d+)$/i);
+  if (bareCodeMatch) {
+    const code = bareCodeMatch[1].toUpperCase();
+    const byKnownCode = knownLanes.find((c) => c.toUpperCase().startsWith(`${code}_`));
+    if (byKnownCode) return byKnownCode;
+  }
+
+  // Exact/normalized match against canonical Duckomat lanes (never overwrite custom project lanes!)
   for (const canonical of CANONICAL_SGE_LANES) {
     if (canonical === trimmed || normalizeKey(canonical) === norm) {
       return canonical;
     }
   }
-  const codeMatch = trimmed.match(/^(S\d+)(?:[_\-:\s]|$)/i);
-  if (codeMatch) {
-    const code = codeMatch[1].toUpperCase();
+  if (bareCodeMatch && knownLanes.length === 0) {
+    const code = bareCodeMatch[1].toUpperCase();
     const byCode = CANONICAL_SGE_LANES.find((c) => c.toUpperCase().startsWith(`${code}_`));
     if (byCode) return byCode;
   }
@@ -147,13 +180,17 @@ export function sortSgeLanes(lanesFromData: string[]): string[] {
   const canonicalOrder = new Map<string, number>(
     CANONICAL_SGE_LANES.map((lane, idx) => [lane, idx])
   );
-  const allLanes = new Set<string>([...CANONICAL_SGE_LANES, ...lanesFromData.filter(Boolean)]);
+  const cleaned = lanesFromData.filter(Boolean);
+  const allLanes = new Set<string>(cleaned);
   return Array.from(allLanes).sort((a, b) => {
     const idxA = canonicalOrder.get(a);
     const idxB = canonicalOrder.get(b);
     if (idxA !== undefined && idxB !== undefined) return idxA - idxB;
-    if (idxA !== undefined) return -1;
-    if (idxB !== undefined) return 1;
+    const numA = a.match(/^S(\d+)/i);
+    const numB = b.match(/^S(\d+)/i);
+    if (numA && numB && numA[1] !== numB[1]) {
+      return Number(numA[1]) - Number(numB[1]);
+    }
     return a.localeCompare(b, 'de', { numeric: true });
   });
 }
@@ -642,11 +679,32 @@ export function validateSgeDataset(
   const errorCount = issues.filter((i) => i.severity === 'error').length;
   const warningCount = issues.filter((i) => i.severity === 'warning').length;
 
+  const knownSgeSheetNames = new Set([
+    'ueberblickdashboard',
+    'uberblickdashboard',
+    'dashboard',
+    'phasenkonfiguration',
+    'rsestammdaten',
+    'rsephasenwechsel',
+    'rsephasenmatrix',
+    'bauteilintegrationen',
+    'mikroiterationen',
+    'entwicklungsschritte',
+    'ursachentestsbefunde',
+    'verbindungenpfeile',
+    'methodiklearnings',
+    'vorabdimensionierung',
+    'sgeauswertung',
+  ]);
+  const detectedSgeSheets = dataset.sheetNamesFound.filter((name) =>
+    knownSgeSheetNames.has(normalizeKey(name))
+  ).length;
+
   return {
     issues,
     errorCount,
     warningCount,
-    sheetsDetected: dataset.sheetNamesFound.length,
+    sheetsDetected: detectedSgeSheets > 0 ? Math.min(13, detectedSgeSheets) : Math.min(13, dataset.sheetNamesFound.length),
     checkedAt: new Date().toLocaleTimeString('de-DE', {
       hour: '2-digit',
       minute: '2-digit',
@@ -660,7 +718,7 @@ export function validateSgeDataset(
       eventCount: dataset.events.length,
       kombiCount: dataset.kombis.length,
       microIterationCount: dataset.microIterations.length,
-      placeholderCount: dataset.microIterations.filter((m) => m.isPlaceholder).length,
+      placeholderCount: 0,
       stepCount: dataset.steps.length,
       causeCount: dataset.causes.length,
       arrowCount: dataset.arrows.length,
@@ -773,6 +831,8 @@ export function parseExcelBuffer(
     }
   }
 
+  const knownDashboardLanes = dashboard.map((d) => d.spurId);
+
   // 3. RSE_Stammdaten
   const rseList: RseMaster[] = [];
   const rseSheet = sheetMap.get('RSE_Stammdaten');
@@ -798,7 +858,7 @@ export function parseExcelBuffer(
       const currentKombiIdRaw = acc.get(['Aktuelle_Kombi_ID']);
       rseList.push({
         rseId,
-        spur: resolveCanonicalLane(acc.get(['Spur'])),
+        spur: resolveCanonicalLane(acc.get(['Spur']), knownDashboardLanes),
         name: acc.get(['RSE_Bezeichnung']),
         origin: acc.get(['Herkunft']),
         firstVersion: firstVerRaw,
@@ -858,7 +918,7 @@ export function parseExcelBuffer(
       events.push({
         eventId: eventId || `EV_ROW_${row.rowIndex}`,
         rseId,
-        spur: resolveCanonicalLane(rawSpur),
+        spur: resolveCanonicalLane(rawSpur, knownDashboardLanes),
         version,
         versionNr,
         lookupKey: acc.get(['Lookup_Key']) || `${rseId}|${versionNr}`,
@@ -939,7 +999,7 @@ export function parseExcelBuffer(
       const kombiIdRaw = acc.get(['Kombi_ID']) || master?.currentKombiIdRaw || '';
       matrix.push({
         rseId,
-        spur: resolveCanonicalLane(acc.get(['Spur']) || master?.spur || ''),
+        spur: resolveCanonicalLane(acc.get(['Spur']) || master?.spur || '', knownDashboardLanes),
         name: acc.get(['RSE_Bezeichnung']) || master?.name || '',
         kombiIdRaw,
         kombiIds: parseIdList(kombiIdRaw),
@@ -996,7 +1056,7 @@ export function parseExcelBuffer(
     }
   }
 
-  // 7. Mikro_Iterationen
+  // 7. Mikro_Iterationen (strictly filter out all placeholder entries)
   const microIterations: MicroIteration[] = [];
   const microSheet = sheetMap.get('Mikro_Iterationen');
   if (microSheet) {
@@ -1014,16 +1074,16 @@ export function parseExcelBuffer(
 
       const version = acc.get(['Version']);
       const evaluation = acc.get(['Bewertung']);
-      const isPlaceholder =
-        detailBox.toUpperCase().startsWith('BOX PH_') ||
-        evaluation.toLowerCase().includes('platzhalter') ||
-        change.trim().startsWith('[Platzhalter');
+
+      if (isPlaceholderMicroIteration({ detailBox, subVersionId, change, evaluation })) {
+        continue;
+      }
 
       microIterations.push({
         id: subVersionId || `${detailBox}_${row.rowIndex}`,
         detailBox,
         rseId,
-        spur: resolveCanonicalLane(acc.get(['Spur']) || rseById.get(rseId)?.spur || ''),
+        spur: resolveCanonicalLane(acc.get(['Spur']) || rseById.get(rseId)?.spur || '', knownDashboardLanes),
         version,
         versionNr: resolveVersionNrFromText(version, versions),
         parentStepId: acc.get(['Gehört_zu_Schritt', 'Gehoert_zu_Schritt']),
@@ -1032,26 +1092,34 @@ export function parseExcelBuffer(
         result: acc.get(['Beobachtetes Ergebnis']),
         evaluation,
         mediaRef: acc.get(['Medien_Ref']),
-        isPlaceholder,
+        isPlaceholder: false,
         rowIndex: row.rowIndex,
       });
     }
   }
 
-  // Reconcile RSE event & micro counts if formulas weren't cached
+  // Always reconcile RSE & Dashboard micro-iteration counts so only real documented entries are counted
   const microCountByRse = new Map<string, number>();
+  const microCountBySpur = new Map<string, number>();
   for (const m of microIterations) {
     if (m.rseId) {
       microCountByRse.set(m.rseId, (microCountByRse.get(m.rseId) ?? 0) + 1);
+    }
+    if (m.spur) {
+      microCountBySpur.set(m.spur, (microCountBySpur.get(m.spur) ?? 0) + 1);
     }
   }
   for (const r of rseList) {
     if (r.versionEventsCount === 0) {
       r.versionEventsCount = eventsByRse.get(r.rseId)?.length ?? 0;
     }
-    if (r.microIterationsCount === 0) {
-      r.microIterationsCount = microCountByRse.get(r.rseId) ?? 0;
-    }
+    r.microIterationsCount = microCountByRse.get(r.rseId) ?? 0;
+  }
+  for (const d of dashboard) {
+    d.microIterationsCount = microCountBySpur.get(d.spurId) ?? 0;
+  }
+  if (dashboardTotal) {
+    dashboardTotal.microIterationsCount = microIterations.length;
   }
 
   // 8. Entwicklungsschritte
@@ -1067,7 +1135,7 @@ export function parseExcelBuffer(
       const rseIdRaw = acc.get(['RSE_ID']);
       steps.push({
         id,
-        spur: resolveCanonicalLane(acc.get(['Spur'])),
+        spur: resolveCanonicalLane(acc.get(['Spur']), knownDashboardLanes),
         rseIdRaw,
         rseIds: parseIdList(rseIdRaw),
         version,
@@ -1294,7 +1362,9 @@ export function buildUpdatedWorkbookBytes(
     };
   });
 
-  const mergedMicro = dataset.microIterations.map((m) => {
+  const mergedMicro = dataset.microIterations
+    .filter((m) => !isPlaceholderMicroIteration(m))
+    .map((m) => {
     const patch = edits.microIterations[m.id];
     const refCandidate = patch?.mediaRef ?? m.mediaRef;
     const resolvedMediaRef =
@@ -1615,12 +1685,22 @@ export function downloadUpdatedXlsx(
   const blob = new Blob([bytes.buffer as ArrayBuffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });
+  const baseName = (dataset.sourceName || 'SGE_Entwicklungsdatenbank')
+    .replace(/\.(xlsx|xls)$/i, '')
+    .replace(/_aktualisiert$/i, '');
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'Duckomat_Entwicklungsdatenbank_v14_aktualisiert.xlsx';
+  a.download = `${baseName}_aktualisiert.xlsx`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
+
+export {
+  buildEmptySgeTemplateBytes,
+  buildExampleCoffeeMachineBytes,
+  downloadEmptySgeTemplateXlsx,
+  downloadExampleProjectXlsx,
+} from './excelTemplates';

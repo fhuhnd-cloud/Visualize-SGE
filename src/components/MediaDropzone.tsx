@@ -117,7 +117,7 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
 
       {activeSrc ? (
         <div className={compact ? 'p-2' : 'p-2.5'}>
-          <div className="group relative overflow-hidden rounded-md border border-slate-200 bg-slate-950/5 dark:border-slate-700">
+          <div className="group relative flex items-center justify-center overflow-hidden rounded-md border border-slate-200 bg-slate-100/80 p-1 dark:border-slate-700 dark:bg-slate-950/70">
             <img
               src={activeSrc}
               alt={attachment?.caption || title}
@@ -129,8 +129,8 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
                   refPath: mediaRefLabel || attachment?.fileName,
                 })
               }
-              className={`w-full cursor-zoom-in object-cover transition-transform duration-200 group-hover:scale-[1.02] ${
-                compact ? 'h-28' : 'h-40'
+              className={`mx-auto block w-auto max-w-full cursor-zoom-in rounded-xs object-contain transition-transform duration-200 group-hover:scale-[1.01] ${
+                compact ? 'max-h-36' : 'max-h-56'
               }`}
             />
             <div className="absolute right-1.5 top-1.5 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
