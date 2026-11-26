@@ -403,19 +403,11 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
               )}
 
               {previewImg && (
-<<<<<<< HEAD
                 <div className="flex justify-center rounded border border-black/10 bg-white/80 p-1">
                   <img
                     src={previewImg}
                     alt={rse.name}
                     className="max-h-24 w-full object-contain"
-=======
-                <div className="flex items-center justify-center overflow-hidden rounded border border-black/10 bg-white/75 p-1 dark:bg-slate-900/50">
-                  <img
-                    src={previewImg}
-                    alt={rse.name}
-                    className="mx-auto block max-h-36 w-auto max-w-full rounded-xs object-contain"
->>>>>>> 047646faa5baf450ac596cda3087ec439f59bc17
                   />
                 </div>
               )}

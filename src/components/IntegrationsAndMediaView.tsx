@@ -13,7 +13,6 @@ import {
   MicroIterationEditPatch,
   SgeDataset,
 } from '../types/sge';
-import { isPlaceholderMicroIteration } from '../utils/excelParser';
 import { ModalState } from './EntityEditModals';
 import { LightboxPayload } from './LightboxModal';
 import { MediaDropzone } from './MediaDropzone';
@@ -32,7 +31,7 @@ interface IntegrationsAndMediaViewProps {
   onOpenLightbox: (payload: LightboxPayload) => void;
 }
 
-type MediaSlotFilter = 'events' | 'all_micro' | 'uploaded';
+type MediaSlotFilter = 'placeholders' | 'kombi' | 'events' | 'all_micro' | 'uploaded';
 
 export const IntegrationsAndMediaView: React.FC<IntegrationsAndMediaViewProps> = ({
   dataset,
@@ -41,13 +40,15 @@ export const IntegrationsAndMediaView: React.FC<IntegrationsAndMediaViewProps> =
   mediaMap,
   onSelectRse,
   onEditMicroIteration,
+  onOpenModal,
   onUploadMedia,
   onUpdateMediaCaption,
   onDeleteMedia,
   onOpenLightbox,
 }) => {
   const isEdit = appMode === 'edit';
-  const [slotFilter, setSlotFilter] = useState<MediaSlotFilter>('events');
+  const [slotFilter, setSlotFilter] = useState<MediaSlotFilter>('placeholders');
+  const [boxFilter, setBoxFilter] = useState<string>('ALL');
   const [editingMicroId, setEditingMicroId] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ change: string; result: string; evaluation: string } | null>(
     null
@@ -58,32 +59,41 @@ export const IntegrationsAndMediaView: React.FC<IntegrationsAndMediaViewProps> =
     [dataset.rseList]
   );
 
-  const realMicroIterations = useMemo(
-    () => dataset.microIterations.filter((m) => !isPlaceholderMicroIteration(m)),
+  const placeholderMicros = useMemo(
+    () =>
+      dataset.microIterations.filter(
+        (m) =>
+          m.detailBox.toUpperCase().startsWith('BOX PH_') ||
+          /^(RH|MH|BV|BH)_\d+/i.test(m.subVersionId)
+      ),
     [dataset.microIterations]
   );
 
+  const placeholderBoxes = useMemo(
+    () => Array.from(new Set(placeholderMicros.map((m) => m.detailBox))),
+    [placeholderMicros]
+  );
+
   const eventsWithMediaRef = useMemo(
-    () =>
-      dataset.events.filter(
-        (e) =>
-          Boolean(e.mediaRef) ||
-          Boolean(mediaMap[`event:${e.eventId}`])
-      ),
-    [dataset.events, mediaMap]
+    () => dataset.events.filter((e) => Boolean(e.mediaRef)),
+    [dataset.events]
   );
 
   const uploadedTotalCount = Object.keys(mediaMap).length;
+  const placeholderFilledCount = placeholderMicros.filter((m) => {
+    const k = m.mediaRef || `micro:${m.id}`;
+    return Boolean(mediaMap[k] || mediaMap[`micro:${m.id}`]);
+  }).length;
 
   return (
     <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-6">
-      {/* Section 1: Bauteil_Integrationen (KOMBI) */}
+      {/* Section 1: Bauteil_Integrationen (KOMBI-01 .. KOMBI-06) */}
       <section>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h2 className="flex items-center gap-2 text-base font-bold text-slate-900 dark:text-white">
               <Link2 className="h-4 w-4 text-teal-600 dark:text-teal-400" />
-              <span>Bauteil-Integrationen ({dataset.kombis.length} KOMBI-Bauteile)</span>
+              <span>Bauteil-Integrationen (KOMBI-01 bis KOMBI-06)</span>
             </h2>
             <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
               Spurübergreifende Funktionsintegrationen – Klick auf ein RSE öffnet direkt dessen
@@ -170,18 +180,17 @@ export const IntegrationsAndMediaView: React.FC<IntegrationsAndMediaViewProps> =
         </div>
       </section>
 
-      {/* Section 2: Foto- & Medien-Verwaltung (IndexedDB) */}
+      {/* Section 2: Foto-Verwaltung & 20 Platzhalter-Hub */}
       <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3 dark:border-slate-800">
           <div>
             <h2 className="flex items-center gap-2 text-base font-bold text-slate-900 dark:text-white">
               <Camera className="h-4 w-4 text-blue-600 dark:text-blue-400" />
-              <span>Foto- &amp; Medien-Verwaltung (IndexedDB)</span>
+              <span>Foto-Verwaltung & Platzhalter-Hub (IndexedDB)</span>
             </h2>
             <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-              Dokumentierte Mikro-Iterationen:{' '}
-              <strong className="font-mono">{realMicroIterations.length}</strong> · Lokale Fotos:{' '}
-              <strong className="font-mono">{uploadedTotalCount}</strong> (per Export als ZIP in{' '}
+              Platzhalter belegt: <strong className="font-mono">{placeholderFilledCount} / {placeholderMicros.length}</strong> ·
+              Gesamte lokale Fotos: <strong className="font-mono">{uploadedTotalCount}</strong> (per Export als ZIP in{' '}
               <code className="font-mono text-[11px]">public/media/</code> sicherbar)
             </p>
           </div>
@@ -189,8 +198,9 @@ export const IntegrationsAndMediaView: React.FC<IntegrationsAndMediaViewProps> =
           <div className="flex flex-wrap items-center gap-1.5">
             {(
               [
+                { id: 'placeholders', label: `20 Foto-Platzhalter (${placeholderMicros.length})` },
                 { id: 'events', label: `Event-Medien (${eventsWithMediaRef.length})` },
-                { id: 'all_micro', label: `Mikro-Iterationen (${realMicroIterations.length})` },
+                { id: 'all_micro', label: `Alle Mikro-It. (${dataset.microIterations.length})` },
                 { id: 'uploaded', label: `Hochgeladen (${uploadedTotalCount})` },
               ] as const
             ).map((tab) => (
@@ -210,10 +220,44 @@ export const IntegrationsAndMediaView: React.FC<IntegrationsAndMediaViewProps> =
           </div>
         </div>
 
+        {/* Sub-filter for the 4 Placeholder Boxes (PH_RH, PH_MH, PH_BV, PH_BH) */}
+        {slotFilter === 'placeholders' && (
+          <div className="mt-3 flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setBoxFilter('ALL')}
+              className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                boxFilter === 'ALL'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300'
+              }`}
+            >
+              Alle 4 Boxen ({placeholderMicros.length})
+            </button>
+            {placeholderBoxes.map((box) => (
+              <button
+                key={box}
+                type="button"
+                onClick={() => setBoxFilter(box)}
+                className={`rounded-full px-2.5 py-1 font-mono text-[11px] font-semibold ${
+                  boxFilter === box
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300'
+                }`}
+              >
+                {box}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Slot Grid */}
         <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-          {slotFilter === 'all_micro' &&
-            realMicroIterations.map((m) => {
+          {(slotFilter === 'placeholders' || slotFilter === 'all_micro') &&
+            (slotFilter === 'placeholders'
+              ? placeholderMicros.filter((m) => boxFilter === 'ALL' || m.detailBox === boxFilter)
+              : dataset.microIterations
+            ).map((m) => {
               const refKey = m.mediaRef || `micro:${m.id}`;
               const isEditing = editingMicroId === m.id;
               return (
@@ -250,7 +294,7 @@ export const IntegrationsAndMediaView: React.FC<IntegrationsAndMediaViewProps> =
                                 evaluation: m.evaluation,
                               });
                             }}
-                            title="Mikro-Iteration bearbeiten"
+                            title="Platzhaltertext bearbeiten"
                             className="rounded p-1 text-slate-400 hover:bg-slate-200/60 hover:text-slate-800 dark:hover:bg-slate-800"
                           >
                             <Edit3 className="h-3.5 w-3.5" />
@@ -374,7 +418,7 @@ export const IntegrationsAndMediaView: React.FC<IntegrationsAndMediaViewProps> =
                 <RefreshCw className="h-6 w-6 opacity-40" />
                 <p className="mt-2 font-medium">Noch keine lokalen Fotos hochgeladen.</p>
                 <p className="mt-0.5 text-[11px]">
-                  Ziehen Sie PNG/JPG/WebP-Dateien direkt auf 2D-Swimlane-Kacheln, Event- oder
+                  Ziehen Sie PNG/JPG/WebP-Dateien auf beliebige Platzhalter-, Event- oder
                   KOMBI-Dropzones.
                 </p>
               </div>

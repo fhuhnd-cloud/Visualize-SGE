@@ -3,7 +3,6 @@ import { Loader2, Upload } from 'lucide-react';
 import { DataTablesView } from './components/DataTablesView';
 import { EntityEditModals, ModalState } from './components/EntityEditModals';
 import { Header } from './components/Header';
-import { ImageCropModal } from './components/ImageCropModal';
 import { IntegrationsAndMediaView } from './components/IntegrationsAndMediaView';
 import { IntegrityBanner } from './components/IntegrityBanner';
 import { LightboxModal, LightboxPayload } from './components/LightboxModal';
@@ -26,13 +25,8 @@ import {
 } from './types/sge';
 import {
   downloadEmptySgeTemplateXlsx,
-<<<<<<< HEAD
   downloadSampleProjectXlsx,
-=======
-  downloadExampleProjectXlsx,
->>>>>>> 047646faa5baf450ac596cda3087ec439f59bc17
   downloadUpdatedXlsx,
-  isPlaceholderMicroIteration,
   parseExcelBuffer,
   parseExcelFile,
   validateSgeDataset,
@@ -53,12 +47,7 @@ import {
   deleteMicroIteration,
   deleteRse,
   deleteRseEvent,
-<<<<<<< HEAD
   updateEventReference,
-=======
-  reconcileDerivedFields,
-  setNodeEventMediaRef,
->>>>>>> 047646faa5baf450ac596cda3087ec439f59bc17
   updateMicroIteration,
   updateRse,
   updateSpur,
@@ -111,17 +100,11 @@ export default function App() {
   const [palette, setPalette] = useState<CustomPalette>(() => loadPaletteFromLocalStorage());
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Right Deep-Dive Drawer (RSE or Arrow), Edit Modal, Crop Modal, and Lightbox
+  // Right Deep-Dive Drawer (RSE or Arrow), Edit Modal, and Lightbox
   const [selectedRseId, setSelectedRseId] = useState<string | null>(null);
   const [selectedArrowId, setSelectedArrowId] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalState>(null);
   const [lightboxItem, setLightboxItem] = useState<LightboxPayload | null>(null);
-  const [pendingCrop, setPendingCrop] = useState<{
-    refKey: string;
-    file: File;
-    title?: string;
-    nodeLink?: { rseId: string; versionKey: string };
-  } | null>(null);
 
   // Locally persisted media (IndexedDB)
   const [mediaMap, setMediaMap] = useState<Record<string, MediaAttachment>>({});
@@ -146,33 +129,14 @@ export default function App() {
     try {
       if (!ignoreSaved) {
         const persisted = await loadPersistedDatasetFromIndexedDb();
-<<<<<<< HEAD
         // Verify schema has Model of SGE fields (generationId + references) before restoring
         const hasNewSchema =
           Boolean(persisted?.dataset?.versions?.[0]?.generationId) &&
           Array.isArray(persisted?.dataset?.events?.[0]?.references);
         if (persisted?.dataset && persisted.dataset.rseList.length > 0 && hasNewSchema) {
           setDataset(persisted.dataset);
-=======
-        if (persisted?.dataset && persisted.dataset.rseList.length > 0) {
-          const hadPlaceholders = persisted.dataset.microIterations.some((m) =>
-            isPlaceholderMicroIteration(m)
-          );
-          const sanitized = hadPlaceholders
-            ? reconcileDerivedFields({
-                ...persisted.dataset,
-                microIterations: persisted.dataset.microIterations.filter(
-                  (m) => !isPlaceholderMicroIteration(m)
-                ),
-              })
-            : persisted.dataset;
-          if (hadPlaceholders) {
-            savePersistedDatasetToIndexedDb(sanitized, persisted.changeCount ?? 0);
-          }
-          setDataset(sanitized);
->>>>>>> 047646faa5baf450ac596cda3087ec439f59bc17
           setChangeCount(persisted.changeCount ?? 0);
-          setSelectedVersionIndex(Math.max(0, sanitized.versions.length - 1));
+          setSelectedVersionIndex(Math.max(0, persisted.dataset.versions.length - 1));
           setLoading(false);
           return;
         }
@@ -328,95 +292,19 @@ export default function App() {
     [mutateDataset]
   );
 
-<<<<<<< HEAD
   const handleUploadMedia = useCallback(
     async (refKey: string, file: File) => {
-=======
-  // Media Upload (opens Crop Modal first), Caption, Delete & 2D-Tile Media Binding
-  const commitMediaFile = useCallback(
-    async (
-      refKey: string,
-      file: File,
-      nodeLink?: { rseId: string; versionKey: string }
-    ) => {
->>>>>>> 047646faa5baf450ac596cda3087ec439f59bc17
       try {
-        let finalRefKey = refKey;
-        if (nodeLink) {
-          const ext =
-            file.type === 'image/webp'
-              ? 'webp'
-              : file.type === 'image/jpeg'
-                ? 'jpg'
-                : 'png';
-          const verSlug = nodeLink.versionKey.replace(/[^a-zA-Z0-9]+/g, '_');
-          const rseSlug = nodeLink.rseId.replace(/[^a-zA-Z0-9]+/g, '_');
-          finalRefKey = `media/${verSlug}_${rseSlug}.${ext}`;
-        }
-
-        const existingCaption =
-          mediaMap[finalRefKey]?.caption ?? mediaMap[refKey]?.caption ?? '';
-        const attachment = await readImageFileAsAttachment(file, finalRefKey, existingCaption);
+        const existingCaption = mediaMap[refKey]?.caption ?? '';
+        const attachment = await readImageFileAsAttachment(file, refKey, existingCaption);
         await saveMediaToIndexedDb(attachment);
-        setMediaMap((prev) => ({ ...prev, [finalRefKey]: attachment }));
-
-        if (nodeLink) {
-          mutateDataset(
-            (prev) =>
-              setNodeEventMediaRef(prev, nodeLink.rseId, nodeLink.versionKey, finalRefKey),
-            `Foto "${file.name}" an ${nodeLink.rseId} (${nodeLink.versionKey}) gespeichert`
-          );
-        } else {
-          showToast(`Foto "${file.name}" gespeichert (${finalRefKey})`);
-        }
+        setMediaMap((prev) => ({ ...prev, [refKey]: attachment }));
+        showToast(`Foto "${file.name}" gespeichert (${refKey})`);
       } catch (err) {
         setImportError(err instanceof Error ? err.message : 'Foto-Upload fehlgeschlagen.');
       }
     },
-    [mediaMap, mutateDataset, showToast]
-  );
-
-  const handleUploadMedia = useCallback((refKey: string, file: File) => {
-    setPendingCrop({
-      refKey,
-      file,
-      title: refKey,
-    });
-  }, []);
-
-  const handleUploadNodeMedia = useCallback(
-    (rseId: string, versionKey: string, file: File) => {
-      const ver = dataset?.versions.find((v) => v.versionKey === versionKey);
-      const existingEv = ver
-        ? dataset?.events.find((e) => e.rseId === rseId && e.versionNr === ver.sortOrder)
-        : undefined;
-      const defaultRef =
-        existingEv?.mediaRef ||
-        `media/${versionKey.replace(/[^a-zA-Z0-9]+/g, '_')}_${rseId.replace(/[^a-zA-Z0-9]+/g, '_')}.webp`;
-      setPendingCrop({
-        refKey: defaultRef,
-        file,
-        title: `${rseId} (${versionKey})`,
-        nodeLink: { rseId, versionKey },
-      });
-    },
-    [dataset]
-  );
-
-  const handleDeleteNodeMedia = useCallback(
-    async (rseId: string, versionKey: string, refKey: string) => {
-      await deleteMediaFromIndexedDb(refKey);
-      setMediaMap((prev) => {
-        const next = { ...prev };
-        delete next[refKey];
-        return next;
-      });
-      mutateDataset(
-        (prev) => setNodeEventMediaRef(prev, rseId, versionKey, ''),
-        `Foto von ${rseId} (${versionKey}) entfernt`
-      );
-    },
-    [mutateDataset]
+    [mediaMap, showToast]
   );
 
   const handleUpdateMediaCaption = useCallback(
@@ -512,7 +400,6 @@ export default function App() {
     >
       {report && dataset && (
         <Header
-          sourceName={dataset.sourceName}
           activeView={activeView}
           onChangeView={setActiveView}
           appMode={appMode}
@@ -547,14 +434,6 @@ export default function App() {
           onExportJson={() => {
             downloadProjectJsonBackup(dataset, palette, mediaMap);
             showToast('Projektpaket (JSON + Bilder) exportiert');
-          }}
-          onDownloadTemplate={() => {
-            downloadEmptySgeTemplateXlsx();
-            showToast('Leeres SGE-Template (inkl. Anleitung_&_Struktur) heruntergeladen');
-          }}
-          onDownloadExample={() => {
-            downloadExampleProjectXlsx();
-            showToast('Beispiel-Projekt (Kaffeemaschine) als .xlsx heruntergeladen');
           }}
           onResetLocalChanges={handleResetLocalChanges}
           darkMode={darkMode}
@@ -676,9 +555,6 @@ export default function App() {
                   )
                 }
                 onOpenModal={setModal}
-                onUploadNodeMedia={handleUploadNodeMedia}
-                onDeleteNodeMedia={handleDeleteNodeMedia}
-                onOpenLightbox={setLightboxItem}
               />
             )}
 
@@ -939,29 +815,6 @@ export default function App() {
         />
       )}
 
-<<<<<<< HEAD
-=======
-      {/* Interactive Image Crop Modal on Upload */}
-      <ImageCropModal
-        file={pendingCrop?.file ?? null}
-        title={pendingCrop?.title}
-        onConfirmCropped={(croppedFile) => {
-          if (pendingCrop) {
-            void commitMediaFile(pendingCrop.refKey, croppedFile, pendingCrop.nodeLink);
-          }
-          setPendingCrop(null);
-        }}
-        onConfirmOriginal={(originalFile) => {
-          if (pendingCrop) {
-            void commitMediaFile(pendingCrop.refKey, originalFile, pendingCrop.nodeLink);
-          }
-          setPendingCrop(null);
-        }}
-        onCancel={() => setPendingCrop(null)}
-      />
-
-      {/* Full-screen Lightbox */}
->>>>>>> 047646faa5baf450ac596cda3087ec439f59bc17
       <LightboxModal item={lightboxItem} onClose={() => setLightboxItem(null)} />
 
       {toast && (
@@ -975,11 +828,7 @@ export default function App() {
           <div className="flex flex-col items-center rounded-xl border-2 border-dashed border-blue-500 bg-white px-10 py-8 text-center shadow-2xl dark:border-blue-400 dark:bg-slate-900">
             <Upload className="h-9 w-9 text-blue-600 dark:text-blue-400" />
             <p className="mt-3 text-base font-semibold text-slate-900 dark:text-slate-100">
-<<<<<<< HEAD
               SGE Excel-Datenbank (.xlsx) oder Projektpaket (.json) ablegen
-=======
-              SGE-Excel (.xlsx) oder Projektpaket (.json) ablegen
->>>>>>> 047646faa5baf450ac596cda3087ec439f59bc17
             </p>
             <p className="mt-1 max-w-md text-xs text-slate-500 dark:text-slate-400">
               Unterstützt Gₙ/Eₙ,ₘ, CV/AV/PV (inkl. automatischer GV→AV Migration) & RSE_Referenzen

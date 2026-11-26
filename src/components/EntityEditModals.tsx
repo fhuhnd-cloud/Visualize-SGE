@@ -24,14 +24,7 @@ export type ModalState =
   | { kind: 'add-rse'; defaultSpur?: string; defaultVersionKey?: string }
   | { kind: 'edit-rse'; rse: RseMaster }
   | { kind: 'upsert-event'; rseId: string; versionKey: string; existing?: RsePhaseEvent }
-  | {
-      kind: 'upsert-arrow';
-      existing?: ConnectionArrow;
-      defaultFromRse?: string;
-      defaultFromVer?: string;
-      defaultToRse?: string;
-      defaultToVer?: string;
-    }
+  | { kind: 'upsert-arrow'; existing?: ConnectionArrow; defaultFromRse?: string; defaultFromVer?: string }
   | { kind: 'upsert-kombi'; existing?: KombiIntegration }
   | { kind: 'upsert-cause'; existing?: CauseFinding; attachToEventId?: string }
   | { kind: 'upsert-learning'; existing?: MethodikLearning }
@@ -80,7 +73,6 @@ interface EntityEditModalsProps {
     arrowType: string;
     causeIdRaw: string;
     rationale: string;
-    targetStatusCode?: StatusCode;
   }) => void;
   onDeleteArrow: (arrowId: string) => void;
   onUpsertKombi: (input: {
@@ -629,7 +621,7 @@ const UpsertEventForm: React.FC<
 
 const UpsertArrowForm: React.FC<
   EntityEditModalsProps & { modal: Extract<ModalState, { kind: 'upsert-arrow' }> }
-> = ({ modal, dataset, palette, onUpsertArrow, onDeleteArrow, onClose }) => {
+> = ({ modal, dataset, onUpsertArrow, onDeleteArrow, onClose }) => {
   const stepMap = new Map(dataset.steps.map((s) => [s.id, s]));
   const verByNr = new Map(dataset.versions.map((v) => [v.sortOrder, v.versionKey]));
 
@@ -648,42 +640,17 @@ const UpsertArrowForm: React.FC<
       'v0.0'
   );
   const [toRseId, setToRseId] = useState(
-    ex?.toRseId ||
-      exToStep?.rseIds[0] ||
-      modal.defaultToRse ||
-      modal.defaultFromRse ||
-      dataset.rseList[0]?.rseId ||
-      ''
+    ex?.toRseId || exToStep?.rseIds[0] || dataset.rseList[0]?.rseId || ''
   );
   const [toVersionKey, setToVersionKey] = useState(
     ex?.toVersionKey ||
       (exToStep?.versionNr ? verByNr.get(exToStep.versionNr) : undefined) ||
-      modal.defaultToVer ||
       dataset.versions[Math.min(1, dataset.versions.length - 1)]?.versionKey ||
       'v1.0'
   );
   const [arrowType, setArrowType] = useState(ex?.arrowType || ARROW_TYPES[0]);
   const [causeIdRaw, setCauseIdRaw] = useState(ex?.causeIdRaw || '');
   const [rationale, setRationale] = useState(ex?.rationale || '');
-  const [targetStatusCode, setTargetStatusCode] = useState<StatusCode>('EC-GV');
-
-  const toVerObj = dataset.versions.find((v) => v.versionKey === toVersionKey);
-  const targetHasEvent = Boolean(
-    toVerObj &&
-      dataset.events.some((ev) => ev.rseId === toRseId && ev.versionNr === toVerObj.sortOrder)
-  );
-
-  const handleArrowTypeChange = (nextType: string) => {
-    setArrowType(nextType);
-    const lower = nextType.toLowerCase();
-    if (lower.includes('konzeptwechsel') || lower.includes('transfer')) {
-      setTargetStatusCode('EC-PV');
-    } else if (lower.includes('problembehebung')) {
-      setTargetStatusCode('UD-GV');
-    } else {
-      setTargetStatusCode('EC-GV');
-    }
-  };
 
   return (
     <form
@@ -698,7 +665,6 @@ const UpsertArrowForm: React.FC<
           arrowType,
           causeIdRaw,
           rationale,
-          targetStatusCode: !ex && !targetHasEvent ? targetStatusCode : undefined,
         });
         onClose();
       }}
@@ -776,7 +742,7 @@ const UpsertArrowForm: React.FC<
           <label className="font-semibold text-slate-600 dark:text-slate-300">Pfeil_Typ</label>
           <select
             value={arrowType}
-            onChange={(e) => handleArrowTypeChange(e.target.value)}
+            onChange={(e) => setArrowType(e.target.value)}
             className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 dark:border-slate-700 dark:bg-slate-800"
           >
             {ARROW_TYPES.map((t) => (
@@ -786,19 +752,6 @@ const UpsertArrowForm: React.FC<
             ))}
           </select>
         </div>
-
-        {!ex && !targetHasEvent && toRseId && toVersionKey && (
-          <div className="space-y-1.5 rounded-lg border border-blue-200 bg-blue-50/70 p-2.5 dark:border-blue-900/70 dark:bg-blue-950/30">
-            <div className="text-[11px] font-semibold text-blue-900 dark:text-blue-200">
-              Neue Kachel für {toRseId} ({toVersionKey}) wird automatisch in RSE_Phasenwechsel angelegt:
-            </div>
-            <IsemStatusPicker
-              value={targetStatusCode}
-              palette={palette}
-              onChange={setTargetStatusCode}
-            />
-          </div>
-        )}
 
         <div>
           <label className="font-semibold text-slate-600 dark:text-slate-300">

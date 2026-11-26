@@ -332,8 +332,7 @@ export const RseDeepDiveDrawer: React.FC<RseDeepDiveDrawerProps> = ({
 
   if (!rse) return null;
 
-  const dashRow = dataset.dashboard.find((d) => d.spurId === rse.spur);
-  const laneName = getLaneDisplayName(rse.spur, dashRow?.name);
+  const laneName = getLaneDisplayName(rse.spur);
   const timelineVersions = dataset.versions.filter((ver) => {
     const hasEvent = rseEvents.some((e) => e.versionNr === ver.sortOrder);
     const hasMicro = (microByVersionNr.get(ver.sortOrder)?.length ?? 0) > 0;
@@ -404,13 +403,8 @@ export const RseDeepDiveDrawer: React.FC<RseDeepDiveDrawerProps> = ({
           </div>
         </div>
 
-        {/* Mini Version Status Strip (clickable to jump or add event in Edit Mode) */}
-        <div
-          style={{
-            gridTemplateColumns: `repeat(${Math.max(1, dataset.versions.length)}, minmax(0, 1fr))`,
-          }}
-          className="mt-3 grid gap-1"
-        >
+        {/* Mini 7-Version Status Strip (clickable to jump or add event in Edit Mode) */}
+        <div className="mt-3 grid grid-cols-7 gap-1">
           {dataset.versions.map((ver, idx) => {
             const stCode = matrixRow?.statusByVersionKey[ver.versionKey] ?? '';
             const sw = getSwatchForStatus(stCode, colorMode, palette, rse.currentLifecycle);

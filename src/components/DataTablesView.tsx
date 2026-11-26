@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { Edit3, Plus } from 'lucide-react';
 import { AppMode, CustomPalette, SgeDataset } from '../types/sge';
-import { isPlaceholderMicroIteration } from '../utils/excelParser';
 import { getSwatchForStatus } from '../utils/sgeVisualConfig';
 import { ModalState } from './EntityEditModals';
 
@@ -37,10 +36,6 @@ export const DataTablesView: React.FC<DataTablesViewProps> = ({
 }) => {
   const isEdit = appMode === 'edit';
   const [activeTab, setActiveTab] = useState<SheetTab>('rse');
-  const cleanMicroIterations = dataset.microIterations.filter(
-    (m) => !isPlaceholderMicroIteration(m)
-  );
-  const lastVerKey = dataset.versions[dataset.versions.length - 1]?.versionKey ?? 'Aktuell';
 
   const tabs: { key: SheetTab; label: string; count: number }[] = [
     { key: 'dashboard', label: 'Überblick_Dashboard', count: dataset.dashboard.length },
@@ -49,7 +44,7 @@ export const DataTablesView: React.FC<DataTablesViewProps> = ({
     { key: 'events', label: 'RSE_Phasenwechsel', count: dataset.events.length },
     { key: 'matrix', label: 'RSE_Phasenmatrix', count: dataset.matrix.length },
     { key: 'kombi', label: 'Bauteil_Integrationen', count: dataset.kombis.length },
-    { key: 'micro', label: 'Mikro_Iterationen', count: cleanMicroIterations.length },
+    { key: 'micro', label: 'Mikro_Iterationen', count: dataset.microIterations.length },
     { key: 'steps', label: 'Entwicklungsschritte', count: dataset.steps.length },
     { key: 'causes', label: 'Ursachen_Tests_Befunde', count: dataset.causes.length },
     { key: 'arrows', label: 'Verbindungen_Pfeile', count: dataset.arrows.length },
@@ -139,7 +134,7 @@ export const DataTablesView: React.FC<DataTablesViewProps> = ({
                   <th className="px-3 py-2">Systemspur</th>
                   <th className="px-3 py-2">Rolle im Gesamtsystem</th>
                   <th className="px-3 py-2">RSE</th>
-                  <th className="px-3 py-2">Aktiv ({lastVerKey})</th>
+                  <th className="px-3 py-2">Aktiv v2.2</th>
                   <th className="px-3 py-2">Entf.</th>
                   <th className="px-3 py-2">Kombi</th>
                   <th className="px-3 py-2">Events</th>
@@ -509,7 +504,7 @@ export const DataTablesView: React.FC<DataTablesViewProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                {cleanMicroIterations.map((m) => (
+                {dataset.microIterations.map((m) => (
                   <tr key={m.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
                     <td className="px-3 py-2 font-mono font-semibold whitespace-nowrap">
                       {m.detailBox}

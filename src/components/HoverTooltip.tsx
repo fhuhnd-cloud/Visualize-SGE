@@ -81,19 +81,11 @@ export const HoverTooltip: React.FC<HoverTooltipProps> = ({ data }) => {
       )}
 
       {data.previewImageUrl && (
-<<<<<<< HEAD
         <div className="mt-2 flex items-center justify-center overflow-hidden rounded-md border border-slate-200 bg-slate-100/80 p-1 dark:border-slate-700 dark:bg-slate-950">
           <img
             src={data.previewImageUrl}
             alt={data.title}
             className="max-h-28 w-full object-contain"
-=======
-        <div className="mt-2 flex items-center justify-center overflow-hidden rounded-md border border-slate-200 bg-slate-100/80 p-1 dark:border-slate-700 dark:bg-slate-800/70">
-          <img
-            src={data.previewImageUrl}
-            alt={data.title}
-            className="mx-auto block max-h-40 w-auto max-w-full rounded-xs object-contain"
->>>>>>> 047646faa5baf450ac596cda3087ec439f59bc17
           />
         </div>
       )}

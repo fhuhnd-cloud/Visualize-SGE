@@ -128,8 +128,8 @@ export const IntegrityBanner: React.FC<IntegrityBannerProps> = ({
               <div className="text-[11px] tabular-nums">
                 Geprüft um {report.checkedAt}: {report.stats.rseCount} RSE ·{' '}
                 {report.stats.eventCount} RSE_Phasenwechsel · {report.stats.kombiCount}{' '}
-                Bauteil_Integrationen · {report.stats.microIterationCount} Mikro_Iterationen ·{' '}
-                {report.stats.stepCount}{' '}
+                Bauteil_Integrationen · {report.stats.microIterationCount} Mikro_Iterationen (
+                {report.stats.placeholderCount} Foto-Platzhalter) · {report.stats.stepCount}{' '}
                 Entwicklungsschritte · {report.stats.causeCount} Ursachen ·{' '}
                 {report.stats.arrowCount} Pfeile · {report.stats.learningCount} Learnings ·{' '}
                 {report.stats.preDimCount} Dimensionierungsparameter.

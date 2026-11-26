@@ -13,7 +13,6 @@ import {
   StatusCode,
   StatusColorGroup,
 } from '../types/sge';
-import { isPlaceholderMicroIteration } from './excelParser';
 import {
   derivePlanningCategoryFromStatus,
   deriveVariationTypeFromStatus,
@@ -358,6 +357,6 @@ export function getKombisForRse(rseId: string, dataset: SgeDataset): KombiIntegr
 
 export function getMicroIterationsForRse(rseId: string, dataset: SgeDataset): MicroIteration[] {
   return dataset.microIterations
-    .filter((m) => m.rseId === rseId && !isPlaceholderMicroIteration(m))
+    .filter((m) => m.rseId === rseId)
     .sort((a, b) => (a.versionNr ?? 99) - (b.versionNr ?? 99) || a.rowIndex - b.rowIndex);
 }
