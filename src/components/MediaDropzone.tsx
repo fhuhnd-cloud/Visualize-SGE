@@ -117,6 +117,7 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
           />
         )}
 
+<<<<<<< HEAD
         {activeSrc ? (
           <div className={compact ? 'p-2' : 'p-2.5'}>
             {/* object-contain frame so photos are never clipped */}
@@ -124,6 +125,29 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
               <img
                 src={activeSrc}
                 alt={attachment?.caption || title}
+=======
+      {activeSrc ? (
+        <div className={compact ? 'p-2' : 'p-2.5'}>
+          <div className="group relative flex items-center justify-center overflow-hidden rounded-md border border-slate-200 bg-slate-100/80 p-1 dark:border-slate-700 dark:bg-slate-950/70">
+            <img
+              src={activeSrc}
+              alt={attachment?.caption || title}
+              onClick={() =>
+                onOpenLightbox({
+                  src: activeSrc,
+                  title,
+                  caption: attachment?.caption || undefined,
+                  refPath: mediaRefLabel || attachment?.fileName,
+                })
+              }
+              className={`mx-auto block w-auto max-w-full cursor-zoom-in rounded-xs object-contain transition-transform duration-200 group-hover:scale-[1.01] ${
+                compact ? 'max-h-36' : 'max-h-56'
+              }`}
+            />
+            <div className="absolute right-1.5 top-1.5 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+              <button
+                type="button"
+>>>>>>> 047646faa5baf450ac596cda3087ec439f59bc17
                 onClick={() =>
                   onOpenLightbox({
                     src: activeSrc,

@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   Archive,
   BarChart3,
+  BookOpen,
   Camera,
   CheckCircle2,
   ChevronDown,
@@ -17,6 +18,7 @@ import {
   Moon,
   Pencil,
   RotateCcw,
+  Sparkles,
   Sun,
   Table2,
   Upload,
@@ -30,6 +32,7 @@ import {
 } from '../types/sge';
 
 interface HeaderProps {
+  sourceName: string;
   activeView: WorkspaceView;
   onChangeView: (view: WorkspaceView) => void;
   appMode: AppMode;
@@ -50,12 +53,15 @@ interface HeaderProps {
   onExportEmptyTemplate: () => void;
   onExportSampleProject: () => void;
   onExportJson: () => void;
+  onDownloadTemplate: () => void;
+  onDownloadExample: () => void;
   onResetLocalChanges: () => void;
   darkMode: boolean;
   onToggleDarkMode: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
+  sourceName,
   activeView,
   onChangeView,
   appMode,
@@ -76,6 +82,8 @@ export const Header: React.FC<HeaderProps> = ({
   onExportEmptyTemplate,
   onExportSampleProject,
   onExportJson,
+  onDownloadTemplate,
+  onDownloadExample,
   onResetLocalChanges,
   darkMode,
   onToggleDarkMode,
@@ -160,9 +168,14 @@ export const Header: React.FC<HeaderProps> = ({
               <path d="M9.5 6.25H14.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
               <path d="M6 9V17.75H14.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
-            <span>Duckomat</span>
+            <span>
+              {sourceName.toLowerCase().includes('duckomat')
+                ? 'Duckomat'
+                : sourceName.replace(/\.(xlsx|xls)$/i, '').replace(/_/g, ' ').slice(0, 26) ||
+                  'Visualize-SGE'}
+            </span>
             <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-              SGE v14
+              {sourceName.toLowerCase().includes('duckomat') ? 'SGE v14' : 'SGE'}
             </span>
           </button>
 
@@ -439,6 +452,46 @@ export const Header: React.FC<HeaderProps> = ({
                     </div>
                     <div className="text-[11px] text-slate-500 dark:text-slate-400">
                       Kompletter Stand inkl. aller Bilder & Änderungen
+                    </div>
+                  </div>
+                </button>
+                <div className="my-1 border-t border-slate-100 dark:border-slate-800" />
+                <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                  Neue Projekte & Vorlagen
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportOpen(false);
+                    onDownloadTemplate();
+                  }}
+                  className="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  <BookOpen className="mt-0.5 h-4 w-4 text-indigo-600 shrink-0" />
+                  <div>
+                    <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                      Leeres Excel-Template (.xlsx) herunterladen
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Inkl. Anleitung_&amp;_Struktur, Formeln &amp; Dropdowns
+                    </div>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportOpen(false);
+                    onDownloadExample();
+                  }}
+                  className="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  <Sparkles className="mt-0.5 h-4 w-4 text-amber-600 shrink-0" />
+                  <div>
+                    <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                      Beispiel-Projekt (.xlsx) herunterladen
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Kaffeemaschine (4 Gen., 3 Spuren, 10 RSE, KOMBI-01)
                     </div>
                   </div>
                 </button>

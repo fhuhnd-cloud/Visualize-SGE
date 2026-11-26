@@ -49,7 +49,7 @@ export const LightboxModal: React.FC<LightboxModalProps> = ({ item, onClose }) =
           <div className="flex items-center gap-2 shrink-0">
             <a
               href={item.src}
-              download={item.refPath?.split('/').pop() || 'duckomat_foto.png'}
+              download={item.refPath?.split('/').pop() || 'sge_foto.png'}
               className="inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-200 transition-colors hover:bg-slate-700"
             >
               <Download className="h-3.5 w-3.5" />
