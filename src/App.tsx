@@ -17,12 +17,15 @@ import {
   CustomPalette,
   DetailLevel,
   MediaAttachment,
+  NomenclatureLang,
   SgeDataset,
   StatusCode,
   StatusColorGroup,
   WorkspaceView,
 } from './types/sge';
 import {
+  downloadEmptySgeTemplateXlsx,
+  downloadSampleProjectXlsx,
   downloadUpdatedXlsx,
   parseExcelBuffer,
   parseExcelFile,
@@ -33,15 +36,18 @@ import {
   computeVersionKpis,
 } from './utils/sgeAnalytics';
 import {
+  addEventReference,
   addMicroIteration,
   addRse,
   deleteArrow,
   deleteCause,
+  deleteEventReference,
   deleteKombi,
   deleteLearning,
   deleteMicroIteration,
   deleteRse,
   deleteRseEvent,
+  updateEventReference,
   updateMicroIteration,
   updateRse,
   updateSpur,
@@ -77,10 +83,11 @@ export default function App() {
   const [importError, setImportError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
-  // Global Multi-View, Mode (Presentation vs Edit), and 3-Stage Detail Depth
-  const [activeView, setActiveView] = useState<WorkspaceView>('board');
+  // Classic clean 2D-Swimlane overview is the default spotlight view
+  const [activeView, setActiveView] = useState<WorkspaceView>('swimlane2d');
   const [appMode, setAppMode] = useState<AppMode>('presentation');
   const [detailLevel, setDetailLevel] = useState<DetailLevel>(1);
+  const [lang, setLang] = useState<NomenclatureLang>('en');
 
   const [darkMode, setDarkMode] = useState(false);
   const [integrityOpen, setIntegrityOpen] = useState(false);
@@ -89,7 +96,7 @@ export default function App() {
   // Version Slider, SGE Color Filters, Color Mode, Custom Palette, Search
   const [selectedVersionIndex, setSelectedVersionIndex] = useState<number>(6);
   const [activeColorFilters, setActiveColorFilters] = useState<StatusColorGroup[]>([]);
-  const [colorMode, setColorMode] = useState<ColorMode>('planning');
+  const [colorMode, setColorMode] = useState<ColorMode>('variation');
   const [palette, setPalette] = useState<CustomPalette>(() => loadPaletteFromLocalStorage());
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -110,21 +117,23 @@ export default function App() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  // Sync dark mode class on <html>
   useEffect(() => {
     const root = document.documentElement;
     if (darkMode) root.classList.add('dark');
     else root.classList.remove('dark');
   }, [darkMode]);
 
-  // Load persisted photos + check for locally saved dataset state in IndexedDB
   const loadBundledDefault = useCallback(async (ignoreSaved = false) => {
     setLoading(true);
     setImportError(null);
     try {
       if (!ignoreSaved) {
         const persisted = await loadPersistedDatasetFromIndexedDb();
-        if (persisted?.dataset && persisted.dataset.rseList.length > 0) {
+        // Verify schema has Model of SGE fields (generationId + references) before restoring
+        const hasNewSchema =
+          Boolean(persisted?.dataset?.versions?.[0]?.generationId) &&
+          Array.isArray(persisted?.dataset?.events?.[0]?.references);
+        if (persisted?.dataset && persisted.dataset.rseList.length > 0 && hasNewSchema) {
           setDataset(persisted.dataset);
           setChangeCount(persisted.changeCount ?? 0);
           setSelectedVersionIndex(Math.max(0, persisted.dataset.versions.length - 1));
@@ -162,7 +171,6 @@ export default function App() {
     loadBundledDefault(false);
   }, [loadBundledDefault]);
 
-  // Central mutation helper: updates live dataset & persists to IndexedDB automatically
   const mutateDataset = useCallback(
     (updater: (prev: SgeDataset) => SgeDataset, toastMsg?: string) => {
       setDataset((prev) => {
@@ -180,7 +188,6 @@ export default function App() {
     [showToast]
   );
 
-  // Live Integrity Report recomputed on every dataset mutation
   const report = useMemo(() => (dataset ? validateSgeDataset(dataset) : null), [dataset]);
 
   const selectedVersion = useMemo(() => {
@@ -204,7 +211,6 @@ export default function App() {
     [dataset]
   );
 
-  // Keyboard shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -230,7 +236,6 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [dataset, activeView, lightboxItem, modal]);
 
-  // Excel File Import
   const handleExcelFileSelected = useCallback(
     async (file: File) => {
       if (!file.name.match(/\.(xlsx|xls)$/i)) {
@@ -260,14 +265,12 @@ export default function App() {
     [showToast]
   );
 
-  // Reset to original bundled Excel
   const handleResetLocalChanges = useCallback(async () => {
     await clearPersistedDatasetInIndexedDb();
     await loadBundledDefault(true);
     showToast('Original-Excel v14 wiederhergestellt');
   }, [loadBundledDefault, showToast]);
 
-  // Palette change
   const handleChangePalette = useCallback((next: CustomPalette) => {
     setPalette(next);
     savePaletteToLocalStorage(next);
@@ -279,7 +282,6 @@ export default function App() {
     );
   }, []);
 
-  // Quick ISEM Status_Code change directly on any card/node/event
   const handleQuickStatusChange = useCallback(
     (rseId: string, versionKey: string, nextStatus: StatusCode) => {
       mutateDataset(
@@ -290,7 +292,6 @@ export default function App() {
     [mutateDataset]
   );
 
-  // Media Upload / Caption / Delete
   const handleUploadMedia = useCallback(
     async (refKey: string, file: File) => {
       try {
@@ -335,7 +336,6 @@ export default function App() {
     [showToast]
   );
 
-  // JSON Project Package Import
   const handleJsonBackupImport = useCallback(
     async (file: File) => {
       try {
@@ -366,7 +366,6 @@ export default function App() {
     [mediaMap, showToast]
   );
 
-  // Global Excel/JSON Drag & Drop
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     if (e.dataTransfer.types.includes('Files')) {
       e.preventDefault();
@@ -390,8 +389,7 @@ export default function App() {
   };
 
   const mediaCount = Object.keys(mediaMap).length;
-  const showTimelineBar =
-    dataset && (activeView === 'board' || activeView === 'matrix' || activeView === 'swimlane2d');
+  const showTimelineBar = dataset && (activeView === 'board' || activeView === 'matrix');
 
   return (
     <div
@@ -400,7 +398,6 @@ export default function App() {
       onDrop={handleDrop}
       className="flex h-screen w-screen flex-col overflow-hidden bg-[#F8FAFC] text-slate-900 dark:bg-[#0B1120] dark:text-slate-100"
     >
-      {/* Top Main Toolbar: Multi-View + 3-Stage Detail Depth + Global Presentation/Edit Mode */}
       {report && dataset && (
         <Header
           activeView={activeView}
@@ -409,6 +406,8 @@ export default function App() {
           onChangeAppMode={setAppMode}
           detailLevel={detailLevel}
           onChangeDetailLevel={setDetailLevel}
+          lang={lang}
+          onChangeLang={setLang}
           report={report}
           integrityOpen={integrityOpen}
           onToggleIntegrity={() => setIntegrityOpen((p) => !p)}
@@ -422,7 +421,15 @@ export default function App() {
           }}
           onExportXlsx={() => {
             downloadUpdatedXlsx(dataset, createEmptyEdits(), mediaMap);
-            showToast('Aktualisierte 13-Blatt .xlsx exportiert');
+            showToast('Aktualisierte SGE-.xlsx exportiert');
+          }}
+          onExportEmptyTemplate={() => {
+            downloadEmptySgeTemplateXlsx();
+            showToast('Leeres SGE-Excel-Template inkl. Anleitung heruntergeladen');
+          }}
+          onExportSampleProject={() => {
+            downloadSampleProjectXlsx(dataset, mediaMap);
+            showToast('Duckomat-Beispielprojekt (.xlsx) heruntergeladen');
           }}
           onExportJson={() => {
             downloadProjectJsonBackup(dataset, palette, mediaMap);
@@ -447,7 +454,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Integrity Banner */}
       {report && dataset && (
         <IntegrityBanner
           sourceName={dataset.sourceName}
@@ -464,13 +470,13 @@ export default function App() {
         />
       )}
 
-      {/* Version Slider & ISEM Color Legend / Filter Bar */}
       {showTimelineBar && dataset && (
         <VersionTimelineBar
           versions={dataset.versions}
           selectedVersionIndex={selectedVersionIndex}
           onSelectVersionIndex={setSelectedVersionIndex}
           appMode={appMode}
+          lang={lang}
           onOpenModal={setModal}
           kpi={versionKpi}
           activeColorFilters={activeColorFilters}
@@ -491,7 +497,7 @@ export default function App() {
           <div className="flex flex-1 flex-col items-center justify-center gap-3 text-slate-500">
             <Loader2 className="h-7 w-7 animate-spin text-blue-600" />
             <p className="text-sm font-medium">
-              Lade Duckomat_Entwicklungsdatenbank_v14.xlsx (13 Blätter)...
+              Lade Duckomat_Entwicklungsdatenbank_v14.xlsx (Model of SGE)...
             </p>
           </div>
         ) : !dataset || !selectedVersion ? (
@@ -506,36 +512,13 @@ export default function App() {
           </div>
         ) : (
           <>
-            {/* View 1: Bestehende Ansicht (Bisheriger Stand – SGE-Karten & Versions-Slider) */}
-            {activeView === 'board' && (
-              <SwimlaneBoard
-                dataset={dataset}
-                selectedVersion={selectedVersion}
-                rseStates={rseStates}
-                appMode={appMode}
-                detailLevel={detailLevel}
-                activeColorFilters={activeColorFilters}
-                colorMode={colorMode}
-                palette={palette}
-                searchQuery={searchQuery}
-                selectedRseId={selectedRseId}
-                mediaMap={mediaMap}
-                onSelectRse={(id) => {
-                  setSelectedArrowId(null);
-                  setSelectedRseId((prev) => (prev === id ? null : id));
-                }}
-                onQuickStatusChange={handleQuickStatusChange}
-                onOpenModal={setModal}
-              />
-            )}
-
-            {/* View 2: NEU – 2D-Swimlane-Entwicklungsansicht mit RSE-Zeilen & SVG-Kausalpfeilen */}
+            {/* View 1 (Default): Bereinigte 2D-Swimlane-Entwicklungsansicht (G_n / E_{n,m}, ohne CV-Kästen) */}
             {activeView === 'swimlane2d' && (
               <Swimlane2DGraphView
                 dataset={dataset}
                 appMode={appMode}
                 detailLevel={detailLevel}
-                colorMode={colorMode}
+                lang={lang}
                 palette={palette}
                 activeColorFilters={activeColorFilters}
                 searchQuery={searchQuery}
@@ -553,16 +536,77 @@ export default function App() {
                   setSelectedArrowId(arrowId);
                 }}
                 onQuickStatusChange={handleQuickStatusChange}
+                onAddEventReference={(eventId, ref) =>
+                  mutateDataset(
+                    (prev) => addEventReference(prev, eventId, ref),
+                    'Referenz hinzugefügt'
+                  )
+                }
+                onUpdateEventReference={(eventId, refId, patch) =>
+                  mutateDataset(
+                    (prev) => updateEventReference(prev, eventId, refId, patch),
+                    'Referenz-Variationsart aktualisiert'
+                  )
+                }
+                onDeleteEventReference={(eventId, refId) =>
+                  mutateDataset(
+                    (prev) => deleteEventReference(prev, eventId, refId),
+                    'Referenz entfernt'
+                  )
+                }
                 onOpenModal={setModal}
               />
             )}
 
-            {/* View 3: SGE-Phasenmatrix, gestapelte SGE-Balkendiagramme & KOMBI-Übersicht */}
+            {/* View 2: SGE-Karten & Versions-Slider */}
+            {activeView === 'board' && (
+              <SwimlaneBoard
+                dataset={dataset}
+                selectedVersion={selectedVersion}
+                rseStates={rseStates}
+                appMode={appMode}
+                detailLevel={detailLevel}
+                lang={lang}
+                activeColorFilters={activeColorFilters}
+                colorMode={colorMode}
+                palette={palette}
+                searchQuery={searchQuery}
+                selectedRseId={selectedRseId}
+                mediaMap={mediaMap}
+                onSelectRse={(id) => {
+                  setSelectedArrowId(null);
+                  setSelectedRseId((prev) => (prev === id ? null : id));
+                }}
+                onQuickStatusChange={handleQuickStatusChange}
+                onAddEventReference={(eventId, ref) =>
+                  mutateDataset(
+                    (prev) => addEventReference(prev, eventId, ref),
+                    'Referenz hinzugefügt'
+                  )
+                }
+                onUpdateEventReference={(eventId, refId, patch) =>
+                  mutateDataset(
+                    (prev) => updateEventReference(prev, eventId, refId, patch),
+                    'Referenz aktualisiert'
+                  )
+                }
+                onDeleteEventReference={(eventId, refId) =>
+                  mutateDataset(
+                    (prev) => deleteEventReference(prev, eventId, refId),
+                    'Referenz entfernt'
+                  )
+                }
+                onOpenModal={setModal}
+              />
+            )}
+
+            {/* View 3: SGE-Matrix, gestapelte SGE-Balkendiagramme & KOMBI-Übersicht */}
             {activeView === 'matrix' && (
               <RseMatrixView
                 dataset={dataset}
                 appMode={appMode}
                 detailLevel={detailLevel}
+                lang={lang}
                 selectedVersionIndex={selectedVersionIndex}
                 selectedVersion={selectedVersion}
                 activeColorFilters={activeColorFilters}
@@ -609,7 +653,7 @@ export default function App() {
               />
             )}
 
-            {/* View 5: Alle 13 Excel-Tabellen */}
+            {/* View 5: Alle Tabellen */}
             {activeView === 'tables' && (
               <div className="flex-1 overflow-hidden">
                 <DataTablesView
@@ -625,7 +669,7 @@ export default function App() {
               </div>
             )}
 
-            {/* Split-Drawer Deep-Dive (RSE oder Kausalpfeil – in jeder Ansicht erreichbar) */}
+            {/* Split-Drawer Deep-Dive (RSE oder Kausalpfeil) */}
             {(selectedRseId || selectedArrowId) && (
               <RseDeepDiveDrawer
                 rseId={selectedRseId}
@@ -633,6 +677,7 @@ export default function App() {
                 dataset={dataset}
                 selectedVersion={selectedVersion}
                 appMode={appMode}
+                lang={lang}
                 colorMode={colorMode}
                 palette={palette}
                 mediaMap={mediaMap}
@@ -646,6 +691,24 @@ export default function App() {
                 }}
                 onSelectVersionIndex={setSelectedVersionIndex}
                 onQuickStatusChange={handleQuickStatusChange}
+                onAddEventReference={(eventId, ref) =>
+                  mutateDataset(
+                    (prev) => addEventReference(prev, eventId, ref),
+                    'Referenz hinzugefügt'
+                  )
+                }
+                onUpdateEventReference={(eventId, refId, patch) =>
+                  mutateDataset(
+                    (prev) => updateEventReference(prev, eventId, refId, patch),
+                    'Referenz aktualisiert'
+                  )
+                }
+                onDeleteEventReference={(eventId, refId) =>
+                  mutateDataset(
+                    (prev) => deleteEventReference(prev, eventId, refId),
+                    'Referenz entfernt'
+                  )
+                }
                 onAddMicroIteration={(input) =>
                   mutateDataset(
                     (prev) => addMicroIteration(prev, input),
@@ -675,7 +738,6 @@ export default function App() {
         )}
       </main>
 
-      {/* Edit / Create Entity Modals */}
       {dataset && (
         <EntityEditModals
           modal={modal}
@@ -747,32 +809,29 @@ export default function App() {
           onUpdateVersion={(versionKey, patch) =>
             mutateDataset(
               (prev) => updateVersionConfig(prev, versionKey, patch),
-              `Version ${versionKey} gespeichert`
+              `Generation / Version ${versionKey} gespeichert`
             )
           }
         />
       )}
 
-      {/* Full-screen Lightbox */}
       <LightboxModal item={lightboxItem} onClose={() => setLightboxItem(null)} />
 
-      {/* Toast Notification */}
       {toast && (
         <div className="fixed bottom-4 right-4 z-50 rounded-lg border border-slate-700 bg-slate-900 px-3.5 py-2 text-xs font-medium text-white shadow-xl dark:border-slate-600 dark:bg-slate-800">
           {toast}
         </div>
       )}
 
-      {/* Global Drag & Drop Overlay */}
       {isDraggingFile && (
         <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 backdrop-blur-[2px]">
           <div className="flex flex-col items-center rounded-xl border-2 border-dashed border-blue-500 bg-white px-10 py-8 text-center shadow-2xl dark:border-blue-400 dark:bg-slate-900">
             <Upload className="h-9 w-9 text-blue-600 dark:text-blue-400" />
             <p className="mt-3 text-base font-semibold text-slate-900 dark:text-slate-100">
-              Duckomat v14 Excel (.xlsx) oder Projektpaket (.json) ablegen
+              SGE Excel-Datenbank (.xlsx) oder Projektpaket (.json) ablegen
             </p>
             <p className="mt-1 max-w-md text-xs text-slate-500 dark:text-slate-400">
-              Liest alle 13 SGE-Tabellenblätter automatisch aus und prüft Fremdschlüssel-Integrität
+              Unterstützt Gₙ/Eₙ,ₘ, CV/AV/PV (inkl. automatischer GV→AV Migration) & RSE_Referenzen
             </p>
           </div>
         </div>

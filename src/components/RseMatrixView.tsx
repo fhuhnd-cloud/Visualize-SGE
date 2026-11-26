@@ -6,6 +6,7 @@ import {
   CustomPalette,
   DetailLevel,
   MediaAttachment,
+  NomenclatureLang,
   PhaseVersionConfig,
   SgeDataset,
   StatusCode,
@@ -14,6 +15,8 @@ import {
 import { computeVersionKpis } from '../utils/sgeAnalytics';
 import {
   formatLaneCodeAndLabel,
+  formatStatusCodeDisplay,
+  formatVariationCode,
   getLaneDisplayName,
   getSwatchForStatus,
   getVariationShortLabel,
@@ -28,6 +31,7 @@ interface RseMatrixViewProps {
   dataset: SgeDataset;
   appMode: AppMode;
   detailLevel: DetailLevel;
+  lang: NomenclatureLang;
   selectedVersionIndex: number;
   selectedVersion: PhaseVersionConfig;
   activeColorFilters: StatusColorGroup[];
@@ -46,18 +50,19 @@ interface RseMatrixViewProps {
 }
 
 const CHART_STACK_GROUPS: { group: Exclude<StatusColorGroup, 'KOMBI'>; label: string }[] = [
-  { group: 'BASE', label: 'BASE' },
+  { group: 'BASE', label: 'G₀ (Ref.)' },
   { group: 'CV', label: 'CV' },
-  { group: 'NEW', label: 'NEW' },
-  { group: 'EC', label: 'EC (GV+PV)' },
-  { group: 'UD', label: 'UD (GV+PV)' },
-  { group: 'REM', label: 'REM' },
+  { group: 'NEW', label: 'PV (Neu)' },
+  { group: 'EC', label: 'EC (AV+PV)' },
+  { group: 'UD', label: 'UD (AV+PV)' },
+  { group: 'REM', label: 'Entfall' },
 ];
 
 export const RseMatrixView: React.FC<RseMatrixViewProps> = ({
   dataset,
   appMode,
   detailLevel,
+  lang,
   selectedVersionIndex,
   selectedVersion,
   activeColorFilters,
@@ -244,10 +249,13 @@ export const RseMatrixView: React.FC<RseMatrixViewProps> = ({
                     </div>
 
                     <div className="mt-1.5 font-mono text-[11px] font-bold text-slate-900 dark:text-white">
-                      {ver.versionKey}
+                      {ver.engineeringGenId}
+                    </div>
+                    <div className="font-mono text-[9.5px] text-slate-500">
+                      {ver.generationId} · {ver.versionKey}
                     </div>
                     <div className="mt-0.5 flex flex-col items-center gap-0.5 text-[9px] tabular-nums text-slate-500 dark:text-slate-400">
-                      <span>CV {Math.round(kpi.carryoverRatio * 100)}%</span>
+                      <span>{formatVariationCode('CV', lang)} {Math.round(kpi.carryoverRatio * 100)}%</span>
                       <span
                         className={
                           kpi.unplannedDeviations > 0
@@ -301,7 +309,7 @@ export const RseMatrixView: React.FC<RseMatrixViewProps> = ({
                       {selKpi.plannedChanges}
                     </div>
                     <div className="text-[11px] text-orange-800/80 dark:text-orange-300/80">
-                      {selKpi.countsByCode['EC-GV']} GV · {selKpi.countsByCode['EC-PV']} PV
+                      {selKpi.countsByCode['EC-AV']} AV · {selKpi.countsByCode['EC-PV']} PV
                     </div>
                   </div>
                   <div className="rounded-lg border border-amber-300 bg-amber-50/70 p-3 dark:border-amber-900/60 dark:bg-amber-950/30">
@@ -348,6 +356,9 @@ export const RseMatrixView: React.FC<RseMatrixViewProps> = ({
                         : 'hover:bg-slate-100/80 dark:hover:bg-slate-900'
                     }`}
                   >
+                    <div className="font-mono text-[10px] font-semibold text-slate-500">
+                      {ver.generationId} · {ver.engineeringGenId}
+                    </div>
                     <div className="font-mono text-xs font-bold">{ver.versionKey}</div>
                     <div className="truncate text-[10px] font-medium text-slate-500 dark:text-slate-400">
                       {ver.phaseName.replace(ver.versionKey, '').trim()}
@@ -355,7 +366,7 @@ export const RseMatrixView: React.FC<RseMatrixViewProps> = ({
                     {ver.isMilestone && (
                       <div className="mt-1 inline-flex items-center gap-0.5 rounded-full border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[9px] font-bold text-amber-900 dark:border-amber-700 dark:bg-amber-950/70 dark:text-amber-200">
                         <Flag className="h-2.5 w-2.5" />
-                        <span>{ver.milestoneBadge.split(':')[0]}</span>
+                        <span>{ver.milestoneLabel || ver.milestoneBadge.split(':')[0]}</span>
                       </div>
                     )}
                   </th>
@@ -510,8 +521,8 @@ export const RseMatrixView: React.FC<RseMatrixViewProps> = ({
                                   }`}
                                 >
                                   {colorMode === 'variation'
-                                    ? `${codeVal} · ${getVariationShortLabel(codeVal)}`
-                                    : codeVal}
+                                    ? getVariationShortLabel(codeVal, lang)
+                                    : formatStatusCodeDisplay(codeVal, lang)}
                                 </span>
                               ) : (
                                 <span className="font-mono text-[10px] text-slate-300 dark:text-slate-700">

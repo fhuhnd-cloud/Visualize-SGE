@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Camera, ImagePlus, Trash2, ZoomIn } from 'lucide-react';
 import { AppMode, MediaAttachment } from '../types/sge';
+import { ImageCropModal } from './ImageCropModal';
 import { LightboxPayload } from './LightboxModal';
 
 interface MediaDropzoneProps {
@@ -32,6 +33,7 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const [publicImageOk, setPublicImageOk] = useState(false);
   const [captionDraft, setCaptionDraft] = useState(attachment?.caption ?? '');
+  const [pendingCropFile, setPendingCropFile] = useState<File | null>(null);
 
   useEffect(() => {
     setCaptionDraft(attachment?.caption ?? '');
@@ -63,79 +65,65 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
     if (!files || files.length === 0) return;
     const file = files[0];
     if (!file.type.match(/^image\/(png|jpeg|jpg|webp)$/i)) return;
-    onUploadFile(refKey, file);
+    setPendingCropFile(file);
   };
 
   const activeSrc = attachment?.dataUrl || (publicImageOk && publicUrl ? publicUrl : null);
   const isEdit = appMode === 'edit';
 
-  // In Presentation Mode, hide empty dropzones completely for a calm, clean layout
   if (!isEdit && !activeSrc) {
     return null;
   }
 
   return (
-    <div
-      onDragOver={(e) => {
-        if (!isEdit) return;
-        e.preventDefault();
-        e.stopPropagation();
-        setIsDragging(true);
-      }}
-      onDragLeave={(e) => {
-        if (!isEdit) return;
-        e.stopPropagation();
-        setIsDragging(false);
-      }}
-      onDrop={(e) => {
-        if (!isEdit) return;
-        e.preventDefault();
-        e.stopPropagation();
-        setIsDragging(false);
-        handleFiles(e.dataTransfer.files);
-      }}
-      className={`rounded-lg border transition-colors ${
-        isDragging
-          ? 'border-blue-500 bg-blue-50/70 dark:border-blue-400 dark:bg-blue-950/40'
-          : activeSrc
-            ? 'border-slate-200 bg-white dark:border-slate-700/80 dark:bg-slate-900/70'
-            : 'border-dashed border-slate-300 bg-slate-50/70 hover:border-blue-400 dark:border-slate-700 dark:bg-slate-900/40 dark:hover:border-blue-500'
-      }`}
-    >
-      {isEdit && (
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/png,image/jpeg,image/webp"
-          className="hidden"
-          onChange={(e) => {
-            handleFiles(e.target.files);
-            e.target.value = '';
-          }}
-        />
-      )}
+    <>
+      <div
+        onDragOver={(e) => {
+          if (!isEdit) return;
+          e.preventDefault();
+          e.stopPropagation();
+          setIsDragging(true);
+        }}
+        onDragLeave={(e) => {
+          if (!isEdit) return;
+          e.stopPropagation();
+          setIsDragging(false);
+        }}
+        onDrop={(e) => {
+          if (!isEdit) return;
+          e.preventDefault();
+          e.stopPropagation();
+          setIsDragging(false);
+          handleFiles(e.dataTransfer.files);
+        }}
+        className={`rounded-lg border transition-colors ${
+          isDragging
+            ? 'border-blue-500 bg-blue-50/70 dark:border-blue-400 dark:bg-blue-950/40'
+            : activeSrc
+              ? 'border-slate-200 bg-white dark:border-slate-700/80 dark:bg-slate-900/70'
+              : 'border-dashed border-slate-300 bg-slate-50/70 hover:border-blue-400 dark:border-slate-700 dark:bg-slate-900/40 dark:hover:border-blue-500'
+        }`}
+      >
+        {isEdit && (
+          <input
+            ref={inputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            className="hidden"
+            onChange={(e) => {
+              handleFiles(e.target.files);
+              e.target.value = '';
+            }}
+          />
+        )}
 
-      {activeSrc ? (
-        <div className={compact ? 'p-2' : 'p-2.5'}>
-          <div className="group relative overflow-hidden rounded-md border border-slate-200 bg-slate-950/5 dark:border-slate-700">
-            <img
-              src={activeSrc}
-              alt={attachment?.caption || title}
-              onClick={() =>
-                onOpenLightbox({
-                  src: activeSrc,
-                  title,
-                  caption: attachment?.caption || undefined,
-                  refPath: mediaRefLabel || attachment?.fileName,
-                })
-              }
-              className={`w-full cursor-zoom-in object-cover transition-transform duration-200 group-hover:scale-[1.02] ${
-                compact ? 'h-28' : 'h-40'
-              }`}
-            />
-            <div className="absolute right-1.5 top-1.5 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-              <button
-                type="button"
+        {activeSrc ? (
+          <div className={compact ? 'p-2' : 'p-2.5'}>
+            {/* object-contain frame so photos are never clipped */}
+            <div className="group relative flex items-center justify-center overflow-hidden rounded-md border border-slate-200 bg-slate-100/80 dark:border-slate-700 dark:bg-slate-950/70">
+              <img
+                src={activeSrc}
+                alt={attachment?.caption || title}
                 onClick={() =>
                   onOpenLightbox({
                     src: activeSrc,
@@ -144,95 +132,120 @@ export const MediaDropzone: React.FC<MediaDropzoneProps> = ({
                     refPath: mediaRefLabel || attachment?.fileName,
                   })
                 }
-                title="In Lightbox vergrößern"
-                className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-slate-900/80 text-white hover:bg-slate-900"
-              >
-                <ZoomIn className="h-3.5 w-3.5" />
-              </button>
-              {isEdit && (
+                className={`w-full cursor-zoom-in object-contain transition-transform duration-200 group-hover:scale-[1.01] ${
+                  compact ? 'max-h-32' : 'max-h-48'
+                }`}
+              />
+              <div className="absolute right-1.5 top-1.5 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                 <button
                   type="button"
-                  onClick={() => inputRef.current?.click()}
-                  title="Foto ersetzen"
+                  onClick={() =>
+                    onOpenLightbox({
+                      src: activeSrc,
+                      title,
+                      caption: attachment?.caption || undefined,
+                      refPath: mediaRefLabel || attachment?.fileName,
+                    })
+                  }
+                  title="In Lightbox vergrößern"
                   className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-slate-900/80 text-white hover:bg-slate-900"
                 >
-                  <Camera className="h-3.5 w-3.5" />
+                  <ZoomIn className="h-3.5 w-3.5" />
                 </button>
-              )}
-              {isEdit && attachment && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (window.confirm('Foto wirklich entfernen?')) {
-                      onDelete(refKey);
+                {isEdit && (
+                  <button
+                    type="button"
+                    onClick={() => inputRef.current?.click()}
+                    title="Foto ersetzen & zuschneiden"
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-slate-900/80 text-white hover:bg-slate-900"
+                  >
+                    <Camera className="h-3.5 w-3.5" />
+                  </button>
+                )}
+                {isEdit && attachment && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (window.confirm('Foto wirklich entfernen?')) {
+                        onDelete(refKey);
+                      }
+                    }}
+                    title="Foto entfernen"
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-red-600/90 text-white hover:bg-red-700"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-1.5 flex flex-col gap-1">
+              {isEdit && attachment ? (
+                <input
+                  type="text"
+                  value={captionDraft}
+                  onChange={(e) => setCaptionDraft(e.target.value)}
+                  onBlur={() => {
+                    if (captionDraft !== attachment.caption) {
+                      onUpdateCaption(refKey, captionDraft);
                     }
                   }}
-                  title="Foto entfernen"
-                  className="inline-flex h-7 w-7 items-center justify-center rounded-md bg-red-600/90 text-white hover:bg-red-700"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                  }}
+                  placeholder="Bildunterschrift hinzufügen..."
+                  className="w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-800 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                />
+              ) : (
+                attachment?.caption && (
+                  <div className="text-[11px] font-medium text-slate-700 dark:text-slate-300">
+                    {attachment.caption}
+                  </div>
+                )
               )}
-            </div>
-          </div>
-
-          <div className="mt-1.5 flex flex-col gap-1">
-            {isEdit && attachment ? (
-              <input
-                type="text"
-                value={captionDraft}
-                onChange={(e) => setCaptionDraft(e.target.value)}
-                onBlur={() => {
-                  if (captionDraft !== attachment.caption) {
-                    onUpdateCaption(refKey, captionDraft);
-                  }
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                }}
-                placeholder="Bildunterschrift hinzufügen..."
-                className="w-full rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-800 placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-              />
-            ) : (
-              attachment?.caption && (
-                <div className="text-[11px] font-medium text-slate-700 dark:text-slate-300">
-                  {attachment.caption}
-                </div>
-              )
-            )}
-            <div className="flex items-center justify-between gap-2 text-[10px] text-slate-500 dark:text-slate-400">
-              <span className="truncate font-mono" title={mediaRefLabel || attachment?.fileName}>
-                {mediaRefLabel || `media/${attachment?.fileName}`}
-              </span>
-              {attachment && (
-                <span className="shrink-0 tabular-nums">
-                  {Math.max(1, Math.round(attachment.sizeBytes / 1024))} KB
+              <div className="flex items-center justify-between gap-2 text-[10px] text-slate-500 dark:text-slate-400">
+                <span className="truncate font-mono" title={mediaRefLabel || attachment?.fileName}>
+                  {mediaRefLabel || `media/${attachment?.fileName}`}
                 </span>
-              )}
+                {attachment && (
+                  <span className="shrink-0 tabular-nums">
+                    {Math.max(1, Math.round(attachment.sizeBytes / 1024))} KB
+                  </span>
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      ) : (
-        <button
-          type="button"
-          onClick={() => inputRef.current?.click()}
-          className={`flex w-full items-center gap-2.5 text-left transition-colors ${
-            compact ? 'px-2.5 py-2' : 'flex-col justify-center px-3 py-4 text-center'
-          }`}
-        >
-          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-slate-200/80 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-            <ImagePlus className="h-3.5 w-3.5" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="text-[11px] font-medium text-slate-700 dark:text-slate-200">
-              Foto hier ablegen oder hochladen
+        ) : (
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            className={`flex w-full items-center gap-2.5 text-left transition-colors ${
+              compact ? 'px-2.5 py-2' : 'flex-col justify-center px-3 py-4 text-center'
+            }`}
+          >
+            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-slate-200/80 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+              <ImagePlus className="h-3.5 w-3.5" />
             </div>
-            <div className="truncate font-mono text-[10px] text-slate-500 dark:text-slate-400">
-              {mediaRefLabel || 'PNG, JPG, WebP'}
+            <div className="min-w-0 flex-1">
+              <div className="text-[11px] font-medium text-slate-700 dark:text-slate-200">
+                Foto ablegen / hochladen (mit Cropper)
+              </div>
+              <div className="truncate font-mono text-[10px] text-slate-500 dark:text-slate-400">
+                {mediaRefLabel || 'PNG, JPG, WebP'}
+              </div>
             </div>
-          </div>
-        </button>
-      )}
-    </div>
+          </button>
+        )}
+      </div>
+
+      <ImageCropModal
+        file={pendingCropFile}
+        onCancel={() => setPendingCropFile(null)}
+        onConfirm={(croppedFile) => {
+          onUploadFile(refKey, croppedFile);
+          setPendingCropFile(null);
+        }}
+      />
+    </>
   );
 };

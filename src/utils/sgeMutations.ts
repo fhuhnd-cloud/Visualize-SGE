@@ -9,7 +9,9 @@ import {
   RseMaster,
   RseMatrixRow,
   RsePhaseEvent,
+  RseReferenceLink,
   SgeDataset,
+  SgeVariationKind,
   SpurDashboardRow,
   StatusCode,
 } from '../types/sge';
@@ -17,12 +19,10 @@ import { classifyArrowType, parseIdList } from './excelParser';
 import {
   derivePlanningCategoryFromStatus,
   deriveVariationTypeFromStatus,
+  isPlannedStatusCode,
+  statusCodeToVariationKind,
 } from './sgeVisualConfig';
 
-/**
- * Recomputes synchronized matrix rows, RSE event/micro counts, and dashboard rollups
- * after any CRUD operation on SgeDataset.
- */
 export function reconcileDerivedFields(dataset: SgeDataset): SgeDataset {
   const eventsByRse = new Map<string, RsePhaseEvent[]>();
   for (const ev of dataset.events) {
@@ -36,14 +36,11 @@ export function reconcileDerivedFields(dataset: SgeDataset): SgeDataset {
 
   const microCountByRse = new Map<string, number>();
   for (const m of dataset.microIterations) {
-    if (m.rseId) {
-      microCountByRse.set(m.rseId, (microCountByRse.get(m.rseId) ?? 0) + 1);
-    }
+    if (m.rseId) microCountByRse.set(m.rseId, (microCountByRse.get(m.rseId) ?? 0) + 1);
   }
 
   const versionBySort = new Map(dataset.versions.map((v) => [v.sortOrder, v]));
 
-  // Reconcile RSE master counts & lifecycle
   const rseList: RseMaster[] = dataset.rseList.map((rse) => {
     const rEvents = eventsByRse.get(rse.rseId) ?? [];
     const lastEv = rEvents[rEvents.length - 1];
@@ -65,8 +62,7 @@ export function reconcileDerivedFields(dataset: SgeDataset): SgeDataset {
       } else {
         removalVersion = '';
         removalVersionNr = null;
-        currentLifecycle =
-          rse.currentKombiIds.length > 0 ? 'Aktiv (Integriert)' : 'Aktiv';
+        currentLifecycle = rse.currentKombiIds.length > 0 ? 'Aktiv (Integriert)' : 'Aktiv';
       }
     }
 
@@ -82,7 +78,6 @@ export function reconcileDerivedFields(dataset: SgeDataset): SgeDataset {
     };
   });
 
-  // Recompute 48x7 RSE_Phasenmatrix strictly from RSE_Stammdaten + RSE_Phasenwechsel
   const matrix: RseMatrixRow[] = rseList.map((rse, idx) => {
     const rEvents = eventsByRse.get(rse.rseId) ?? [];
     const byVerNr = new Map<number, RsePhaseEvent>();
@@ -113,7 +108,6 @@ export function reconcileDerivedFields(dataset: SgeDataset): SgeDataset {
     };
   });
 
-  // Reconcile dashboard rollups
   const lastVerKey = dataset.versions[dataset.versions.length - 1]?.versionKey ?? '';
   const matrixByRse = new Map(matrix.map((m) => [m.rseId, m]));
 
@@ -151,16 +145,9 @@ export function reconcileDerivedFields(dataset: SgeDataset): SgeDataset {
       }
     : null;
 
-  return {
-    ...dataset,
-    rseList,
-    matrix,
-    dashboard,
-    dashboardTotal,
-  };
+  return { ...dataset, rseList, matrix, dashboard, dashboardTotal };
 }
 
-/** Generate next sequential ID like EV166, P_51, U26, M17, E50, KOMBI-07 */
 export function generateNextId(existingIds: string[], prefix: string, pad = 2): string {
   let maxNum = 0;
   const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -175,7 +162,6 @@ export function generateNextId(existingIds: string[], prefix: string, pad = 2): 
   return `${prefix}${String(maxNum + 1).padStart(pad, '0')}`;
 }
 
-/** Generate next RSE ID inside a lane, e.g. R2.9 */
 export function generateNextRseId(existingRseIds: string[], spurId: string): string {
   const laneMatch = spurId.match(/^S(\d+)/i);
   const laneNum = laneMatch ? laneMatch[1] : '1';
@@ -220,20 +206,30 @@ export function updateSpur(
   return { ...dataset, dashboard };
 }
 
-// --- VERSION / MILESTONE CRUD ---
+// --- VERSION / GENERATION CRUD ---
 export function updateVersionConfig(
   dataset: SgeDataset,
   versionKey: string,
-  patch: Partial<Pick<PhaseVersionConfig, 'phaseName' | 'milestoneBadge' | 'systemStateSummary'>>
+  patch: Partial<
+    Pick<
+      PhaseVersionConfig,
+      'phaseName' | 'generationId' | 'generationName' | 'engineeringGenId' | 'milestoneLabel' | 'milestoneBadge' | 'systemStateSummary'
+    >
+  >
 ): SgeDataset {
   const versions = dataset.versions.map((v) => {
     if (v.versionKey !== versionKey) return v;
     const badge = patch.milestoneBadge !== undefined ? patch.milestoneBadge.trim() : v.milestoneBadge;
+    const mLabel = patch.milestoneLabel !== undefined ? patch.milestoneLabel.trim() : v.milestoneLabel;
     return {
       ...v,
       phaseName: patch.phaseName ?? v.phaseName,
+      generationId: patch.generationId ?? v.generationId,
+      generationName: patch.generationName ?? v.generationName,
+      engineeringGenId: patch.engineeringGenId ?? v.engineeringGenId,
+      milestoneLabel: mLabel === '-' ? '' : mLabel,
       milestoneBadge: badge === '-' ? '' : badge,
-      isMilestone: /^M\d+/i.test(badge),
+      isMilestone: /^ME\s*G/i.test(mLabel) || /^M\d+/i.test(badge) || /^M\d+/i.test(mLabel),
       systemStateSummary: patch.systemStateSummary ?? v.systemStateSummary,
     };
   });
@@ -254,7 +250,7 @@ export function addRse(
     predecessorOrReplacement?: string;
   }
 ): { dataset: SgeDataset; createdRseId: string } {
-  const rseId = (input.rseId?.trim() || generateNextRseId(dataset.rseList.map((r) => r.rseId), input.spur));
+  const rseId = input.rseId?.trim() || generateNextRseId(dataset.rseList.map((r) => r.rseId), input.spur);
   const version =
     dataset.versions.find((v) => v.versionKey === input.firstVersionKey) ?? dataset.versions[0];
   const eventId = generateNextId(dataset.events.map((e) => e.eventId), 'EV', 3);
@@ -280,6 +276,7 @@ export function addRse(
     rowIndex: dataset.rseList.length + 2,
   };
 
+  const sgeVar = statusCodeToVariationKind(input.initialStatus);
   const newEvent: RsePhaseEvent = {
     eventId,
     rseId,
@@ -288,8 +285,10 @@ export function addRse(
     versionNr: version?.sortOrder ?? 1,
     lookupKey: `${rseId}|${version?.sortOrder ?? 1}`,
     statusCode: input.initialStatus,
+    sgeVariation: sgeVar,
+    isPlanned: isPlannedStatusCode(input.initialStatus),
     planningCategoryFig2: derivePlanningCategoryFromStatus(input.initialStatus),
-    variationType: deriveVariationTypeFromStatus(input.initialStatus),
+    variationType: deriveVariationTypeFromStatus(input.initialStatus, 'en'),
     kombiPartIdRaw: '',
     kombiPartIds: [],
     stateDescription: input.functionSummary || input.name,
@@ -300,6 +299,16 @@ export function addRse(
     stepIds: [],
     reviewStatus: 'Bearbeitet',
     mediaRef: '',
+    references: [
+      {
+        id: `${eventId}_ref_1`,
+        refRseId: rseId,
+        refName: newRse.name,
+        originGeneration: input.origin || 'Extern / Neu',
+        variationType: sgeVar,
+        rationale: input.functionSummary || 'Neu angelegt',
+      },
+    ],
     rowIndex: dataset.events.length + 2,
   };
 
@@ -331,7 +340,6 @@ export function updateRse(
       currentKombiIds: parseIdList(kombiRaw),
     };
   });
-  // If lane changed, also update events & microIterations for consistency
   const events = patch.spur
     ? dataset.events.map((e) => (e.rseId === rseId ? { ...e, spur: patch.spur! } : e))
     : dataset.events;
@@ -383,6 +391,8 @@ export function upsertRseEvent(
     (input.eventId ? dataset.events.find((e) => e.eventId === input.eventId) : undefined) ??
     dataset.events.find((e) => e.rseId === input.rseId && e.versionNr === ver.sortOrder);
 
+  const sgeVar = statusCodeToVariationKind(input.statusCode);
+
   if (existing) {
     const events = dataset.events.map((e) => {
       if (e.eventId !== existing.eventId) return e;
@@ -392,8 +402,10 @@ export function upsertRseEvent(
       return {
         ...e,
         statusCode: input.statusCode,
+        sgeVariation: sgeVar,
+        isPlanned: isPlannedStatusCode(input.statusCode),
         planningCategoryFig2: derivePlanningCategoryFromStatus(input.statusCode),
-        variationType: deriveVariationTypeFromStatus(input.statusCode),
+        variationType: deriveVariationTypeFromStatus(input.statusCode, 'en'),
         stateDescription: input.stateDescription !== undefined ? input.stateDescription : e.stateDescription,
         rationale: input.rationale !== undefined ? input.rationale : e.rationale,
         causeIdRaw: causeRaw,
@@ -420,8 +432,10 @@ export function upsertRseEvent(
     versionNr: ver.sortOrder,
     lookupKey: `${rse.rseId}|${ver.sortOrder}`,
     statusCode: input.statusCode,
+    sgeVariation: sgeVar,
+    isPlanned: isPlannedStatusCode(input.statusCode),
     planningCategoryFig2: derivePlanningCategoryFromStatus(input.statusCode),
-    variationType: deriveVariationTypeFromStatus(input.statusCode),
+    variationType: deriveVariationTypeFromStatus(input.statusCode, 'en'),
     kombiPartIdRaw: kombiRaw,
     kombiPartIds: parseIdList(kombiRaw),
     stateDescription: input.stateDescription ?? `${rse.name} (${input.statusCode})`,
@@ -432,6 +446,16 @@ export function upsertRseEvent(
     stepIds: parseIdList(stepRaw),
     reviewStatus: 'Bearbeitet',
     mediaRef: input.mediaRef ?? '',
+    references: [
+      {
+        id: `${newEventId}_ref_1`,
+        refRseId: rse.rseId,
+        refName: rse.name,
+        originGeneration: ver.sortOrder > 1 ? `G_${Math.max(0, ver.sortOrder - 2)}` : 'G_0',
+        variationType: sgeVar,
+        rationale: input.rationale || 'Neu erfasste Referenz',
+      },
+    ],
     rowIndex: dataset.events.length + 2,
   };
 
@@ -442,8 +466,58 @@ export function upsertRseEvent(
 }
 
 export function deleteRseEvent(dataset: SgeDataset, eventId: string): SgeDataset {
-  const events = dataset.events.filter((e) => e.eventId !== eventId);
-  return reconcileDerivedFields({ ...dataset, events });
+  return reconcileDerivedFields({
+    ...dataset,
+    events: dataset.events.filter((e) => e.eventId !== eventId),
+  });
+}
+
+// --- REFERENCE LINK CRUD (for detached reference bar & expandable table) ---
+export function addEventReference(
+  dataset: SgeDataset,
+  eventId: string,
+  refInput: Omit<RseReferenceLink, 'id'>
+): SgeDataset {
+  const events = dataset.events.map((ev) => {
+    if (ev.eventId !== eventId) return ev;
+    const id = `${eventId}_ref_${Date.now()}`;
+    return {
+      ...ev,
+      references: [...ev.references, { id, ...refInput }],
+    };
+  });
+  return { ...dataset, events };
+}
+
+export function updateEventReference(
+  dataset: SgeDataset,
+  eventId: string,
+  refId: string,
+  patch: Partial<Omit<RseReferenceLink, 'id'>>
+): SgeDataset {
+  const events = dataset.events.map((ev) => {
+    if (ev.eventId !== eventId) return ev;
+    return {
+      ...ev,
+      references: ev.references.map((r) => (r.id === refId ? { ...r, ...patch } : r)),
+    };
+  });
+  return { ...dataset, events };
+}
+
+export function deleteEventReference(
+  dataset: SgeDataset,
+  eventId: string,
+  refId: string
+): SgeDataset {
+  const events = dataset.events.map((ev) => {
+    if (ev.eventId !== eventId) return ev;
+    return {
+      ...ev,
+      references: ev.references.filter((r) => r.id !== refId),
+    };
+  });
+  return { ...dataset, events };
 }
 
 // --- MICRO-ITERATION CRUD ---
@@ -454,6 +528,7 @@ export function addMicroIteration(
     versionKey: string;
     detailBox: string;
     subVersionId: string;
+    variationType?: SgeVariationKind;
     parentStepId?: string;
     change: string;
     result: string;
@@ -473,6 +548,7 @@ export function addMicroIteration(
     versionNr: ver?.sortOrder ?? null,
     parentStepId: input.parentStepId ?? '',
     subVersionId: id,
+    variationType: input.variationType ?? 'AV',
     change: input.change,
     result: input.result,
     evaluation: input.evaluation,
@@ -489,7 +565,9 @@ export function addMicroIteration(
 export function updateMicroIteration(
   dataset: SgeDataset,
   microId: string,
-  patch: Partial<Pick<MicroIteration, 'detailBox' | 'subVersionId' | 'change' | 'result' | 'evaluation' | 'mediaRef'>>
+  patch: Partial<
+    Pick<MicroIteration, 'detailBox' | 'subVersionId' | 'variationType' | 'change' | 'result' | 'evaluation' | 'mediaRef'>
+  >
 ): SgeDataset {
   const microIterations = dataset.microIterations.map((m) => {
     if (m.id !== microId) return m;
@@ -546,7 +624,6 @@ export function upsertKombi(
     ? dataset.kombis.map((k) => (k.kombiId === kombiId ? { ...k, ...entry, rowIndex: k.rowIndex } : k))
     : [...dataset.kombis, entry];
 
-  // Sync currentKombiIds on involved RSEs
   const rseList = dataset.rseList.map((r) => {
     const isInvolved = input.involvedRseIds.includes(r.rseId);
     const hasKombi = r.currentKombiIds.includes(kombiId);
@@ -579,7 +656,7 @@ export function deleteKombi(dataset: SgeDataset, kombiId: string): SgeDataset {
   return reconcileDerivedFields({ ...dataset, kombis, rseList, events });
 }
 
-// --- CAUSAL ARROW (Verbindungen_Pfeile) CRUD ---
+// --- CAUSAL ARROW CRUD ---
 export function upsertArrow(
   dataset: SgeDataset,
   input: {
@@ -598,7 +675,6 @@ export function upsertArrow(
   const fromRse = dataset.rseList.find((r) => r.rseId === input.fromRseId);
   const toRse = dataset.rseList.find((r) => r.rseId === input.toRseId);
 
-  // Find or create matching Entwicklungsschritte so Excel foreign keys stay 100% valid!
   let steps = [...dataset.steps];
   const findOrCreateStep = (rseId: string, ver: PhaseVersionConfig | undefined, spur: string): string => {
     const existingStep = steps.find(
@@ -663,13 +739,10 @@ export function upsertArrow(
 }
 
 export function deleteArrow(dataset: SgeDataset, arrowId: string): SgeDataset {
-  return {
-    ...dataset,
-    arrows: dataset.arrows.filter((a) => a.id !== arrowId),
-  };
+  return { ...dataset, arrows: dataset.arrows.filter((a) => a.id !== arrowId) };
 }
 
-// --- CAUSE (Ursachen_Tests_Befunde) CRUD ---
+// --- CAUSE CRUD ---
 export function upsertCause(
   dataset: SgeDataset,
   input: {
@@ -731,7 +804,7 @@ export function deleteCause(dataset: SgeDataset, causeId: string): SgeDataset {
   return { ...dataset, causes, events, arrows };
 }
 
-// --- METHODIK LEARNINGS CRUD ---
+// --- LEARNING CRUD ---
 export function upsertLearning(
   dataset: SgeDataset,
   input: {
@@ -765,8 +838,5 @@ export function upsertLearning(
 }
 
 export function deleteLearning(dataset: SgeDataset, learningId: string): SgeDataset {
-  return {
-    ...dataset,
-    learnings: dataset.learnings.filter((l) => l.id !== learningId),
-  };
+  return { ...dataset, learnings: dataset.learnings.filter((l) => l.id !== learningId) };
 }

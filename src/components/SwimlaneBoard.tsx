@@ -19,7 +19,9 @@ import {
   CustomPalette,
   DetailLevel,
   MediaAttachment,
+  NomenclatureLang,
   PhaseVersionConfig,
+  RseReferenceLink,
   SgeDataset,
   StatusCode,
   StatusColorGroup,
@@ -32,14 +34,19 @@ import {
 } from '../utils/sgeAnalytics';
 import {
   ALL_STATUS_CODES,
+  VARIATION_MARKER_COLORS,
   formatLaneCodeAndLabel,
+  formatStatusCodeDisplay,
+  formatVariationCode,
   getLaneDisplayName,
   getSwatchForStatus,
   getVariationShortLabel,
   statusCodeToColorGroup,
+  statusCodeToVariationKind,
 } from '../utils/sgeVisualConfig';
 import { ModalState } from './EntityEditModals';
 import { HoverTooltip, HoverTooltipData } from './HoverTooltip';
+import { ReferenceBarAndTable } from './ReferenceBarAndTable';
 
 interface SwimlaneBoardProps {
   dataset: SgeDataset;
@@ -47,6 +54,7 @@ interface SwimlaneBoardProps {
   rseStates: Map<string, RseStateAtVersion>;
   appMode: AppMode;
   detailLevel: DetailLevel;
+  lang: NomenclatureLang;
   activeColorFilters: StatusColorGroup[];
   colorMode: ColorMode;
   palette: CustomPalette;
@@ -55,6 +63,13 @@ interface SwimlaneBoardProps {
   mediaMap: Record<string, MediaAttachment>;
   onSelectRse: (rseId: string) => void;
   onQuickStatusChange: (rseId: string, versionKey: string, nextStatus: StatusCode) => void;
+  onAddEventReference: (eventId: string, ref: Omit<RseReferenceLink, 'id'>) => void;
+  onUpdateEventReference: (
+    eventId: string,
+    refId: string,
+    patch: Partial<Omit<RseReferenceLink, 'id'>>
+  ) => void;
+  onDeleteEventReference: (eventId: string, refId: string) => void;
   onOpenModal: (modal: ModalState) => void;
 }
 
@@ -64,6 +79,7 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
   rseStates,
   appMode,
   detailLevel,
+  lang,
   activeColorFilters,
   colorMode,
   palette,
@@ -72,6 +88,9 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
   mediaMap,
   onSelectRse,
   onQuickStatusChange,
+  onAddEventReference,
+  onUpdateEventReference,
+  onDeleteEventReference,
   onOpenModal,
 }) => {
   const isEdit = appMode === 'edit';
@@ -267,7 +286,7 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
                 >
                   {ALL_STATUS_CODES.map((c) => (
                     <option key={c} value={c}>
-                      {c}
+                      {formatStatusCodeDisplay(c, lang)}
                     </option>
                   ))}
                 </select>
@@ -277,16 +296,16 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
                     style={{ borderColor: swatch.border, color: swatch.text }}
                     className="rounded border bg-white/80 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none"
                   >
-                    {effectiveCode}
+                    {formatStatusCodeDisplay(effectiveCode, lang)}
                   </span>
                 )
               )}
               {colorMode === 'variation' && effectiveCode && (
                 <span
-                  style={{ color: swatch.text }}
-                  className="font-mono text-[10px] font-semibold opacity-80"
+                  style={{ color: VARIATION_MARKER_COLORS[effectiveCode === 'BASE' ? 'BASE' : statusCodeToVariationKind(effectiveCode)].text }}
+                  className="font-mono text-[10px] font-semibold opacity-85"
                 >
-                  {getVariationShortLabel(effectiveCode)}
+                  {getVariationShortLabel(effectiveCode, lang)}
                 </span>
               )}
             </div>
@@ -384,11 +403,13 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
               )}
 
               {previewImg && (
-                <img
-                  src={previewImg}
-                  alt={rse.name}
-                  className="h-20 w-full rounded border border-black/10 object-cover"
-                />
+                <div className="flex justify-center rounded border border-black/10 bg-white/80 p-1">
+                  <img
+                    src={previewImg}
+                    alt={rse.name}
+                    className="max-h-24 w-full object-contain"
+                  />
+                </div>
               )}
             </div>
           )}
@@ -448,6 +469,22 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
             </span>
           ))}
         </div>
+
+        {/* Detached Compact Reference Bar & Expandable Reference Table */}
+        {activeEvent && (
+          <ReferenceBarAndTable
+            eventId={activeEvent.eventId}
+            references={activeEvent.references}
+            rseList={dataset.rseList}
+            appMode={appMode}
+            lang={lang}
+            compact
+            onAddReference={onAddEventReference}
+            onUpdateReference={onUpdateEventReference}
+            onDeleteReference={onDeleteEventReference}
+            onSelectRse={onSelectRse}
+          />
+        )}
       </article>
     );
   };
@@ -468,7 +505,7 @@ export const SwimlaneBoard: React.FC<SwimlaneBoardProps> = ({
             (st) => st.eventAtVersion && st.statusCode !== 'CV' && st.statusCode !== 'BASE'
           ).length;
           const udInVersion = laneItems.filter(
-            (st) => st.statusCode === 'UD-GV' || st.statusCode === 'UD-PV'
+            (st) => st.statusCode === 'UD-AV' || st.statusCode === 'UD-PV'
           ).length;
           const kombiCountInLane = laneItems.filter((st) => st.kombiIdsAtVersion.length > 0).length;
 

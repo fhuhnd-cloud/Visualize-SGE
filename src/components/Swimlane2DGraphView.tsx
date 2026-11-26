@@ -19,37 +19,45 @@ import {
 } from 'lucide-react';
 import {
   AppMode,
-  ColorMode,
   ConnectionArrow,
   CustomPalette,
   DetailLevel,
   EdgeCategory,
   MediaAttachment,
+  NomenclatureLang,
+  PhaseVersionConfig,
   RsePhaseEvent,
+  RseReferenceLink,
   SgeDataset,
   StatusCode,
   StatusColorGroup,
 } from '../types/sge';
 import {
+  computeVersionKpis,
   getCausesForEvent,
   getLearningsForEvent,
+  groupVersionsByGeneration,
 } from '../utils/sgeAnalytics';
 import {
   ALL_STATUS_CODES,
   EDGE_STYLES,
+  VARIATION_MARKER_COLORS,
   formatLaneCodeAndLabel,
+  formatStatusCodeDisplay,
+  formatVariationCode,
   getLaneDisplayName,
-  getSwatchForStatus,
   statusCodeToColorGroup,
+  statusCodeToVariationKind,
 } from '../utils/sgeVisualConfig';
 import { ModalState } from './EntityEditModals';
 import { HoverTooltip, HoverTooltipData } from './HoverTooltip';
+import { ReferenceBarAndTable } from './ReferenceBarAndTable';
 
 interface Swimlane2DGraphViewProps {
   dataset: SgeDataset;
   appMode: AppMode;
   detailLevel: DetailLevel;
-  colorMode: ColorMode;
+  lang: NomenclatureLang;
   palette: CustomPalette;
   activeColorFilters: StatusColorGroup[];
   searchQuery: string;
@@ -60,6 +68,13 @@ interface Swimlane2DGraphViewProps {
   onSelectRse: (rseId: string, versionIndex?: number) => void;
   onSelectArrow: (arrowId: string) => void;
   onQuickStatusChange: (rseId: string, versionKey: string, nextStatus: StatusCode) => void;
+  onAddEventReference: (eventId: string, ref: Omit<RseReferenceLink, 'id'>) => void;
+  onUpdateEventReference: (
+    eventId: string,
+    refId: string,
+    patch: Partial<Omit<RseReferenceLink, 'id'>>
+  ) => void;
+  onDeleteEventReference: (eventId: string, refId: string) => void;
   onOpenModal: (modal: ModalState) => void;
 }
 
@@ -74,15 +89,29 @@ interface BoxRect {
   cy: number;
 }
 
+interface VisibleColumn {
+  colId: string;                 // versionKey when expanded, or `GEN::${generationId}` when collapsed
+  generationId: string;
+  generationName: string;
+  isCondensedGen: boolean;
+  /** Underlying versions covered by this column */
+  versions: PhaseVersionConfig[];
+  primaryVersion: PhaseVersionConfig;
+  labelTop: string;              // e.g. "E_{3,2}" or "G_3"
+  labelSub: string;              // e.g. "v2.0 Ultraschall" or "Antrittsvorlesung / Aktuell"
+  milestoneLabel: string;
+  isMilestone: boolean;
+}
+
 interface ResolvedArrow {
   arrow: ConnectionArrow;
   fromKey: string;
   toKey: string;
   fromRseId: string;
   toRseId: string;
-  fromVerKey: string;
-  toVerKey: string;
-  sameVersion: boolean;
+  fromLabel: string;
+  toLabel: string;
+  sameColumn: boolean;
   sameNode: boolean;
 }
 
@@ -102,7 +131,7 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
   dataset,
   appMode,
   detailLevel,
-  colorMode,
+  lang,
   palette,
   activeColorFilters,
   searchQuery,
@@ -113,19 +142,21 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
   onSelectRse,
   onSelectArrow,
   onQuickStatusChange,
+  onAddEventReference,
+  onUpdateEventReference,
+  onDeleteEventReference,
   onOpenModal,
 }) => {
   const isEdit = appMode === 'edit';
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
 
-  // Collapsible swimlanes (all 9 lanes expanded by default, user can collapse any lane)
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(new Set());
+  const [collapsedGenerations, setCollapsedGenerations] = useState<Set<string>>(new Set());
   const [showArrows, setShowArrows] = useState(true);
-  const [onlyChangeEvents, setOnlyChangeEvents] = useState(false);
   const [enabledArrowTypes, setEnabledArrowTypes] = useState<EdgeCategory[]>(EDGE_ORDER);
 
-  // Zoom & Pan state
+  // Zoom & Pan
   const [zoom, setZoom] = useState(0.88);
   const [pan, setPan] = useState({ x: 16, y: 16 });
   const [isPanning, setIsPanning] = useState(false);
@@ -133,11 +164,8 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
 
-  // Measured node positions for SVG overlay
   const [nodeBoxes, setNodeBoxes] = useState<Map<string, BoxRect>>(new Map());
   const [contentSize, setContentSize] = useState({ width: 1800, height: 1200 });
-
-  // Hover states & Tooltip
   const [hoveredNodeKey, setHoveredNodeKey] = useState<string | null>(null);
   const [hoveredArrowId, setHoveredArrowId] = useState<string | null>(null);
   const [tooltip, setTooltip] = useState<HoverTooltipData | null>(null);
@@ -146,29 +174,93 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
     () => new Map(dataset.dashboard.map((d) => [d.spurId, d])),
     [dataset.dashboard]
   );
-
   const rseById = useMemo(
     () => new Map(dataset.rseList.map((r) => [r.rseId, r])),
     [dataset.rseList]
   );
-
   const causeById = useMemo(
     () => new Map(dataset.causes.map((c) => [c.id, c])),
     [dataset.causes]
   );
-
-  const matrixByRse = useMemo(
-    () => new Map(dataset.matrix.map((m) => [m.rseId, m])),
-    [dataset.matrix]
-  );
-
   const versionKeyByNr = useMemo(
     () => new Map(dataset.versions.map((v) => [v.sortOrder, v.versionKey])),
     [dataset.versions]
   );
+  const versionIndexByKey = useMemo(
+    () => new Map(dataset.versions.map((v, i) => [v.versionKey, i])),
+    [dataset.versions]
+  );
+
+  // Two-level Generation Groups (G_0 .. G_3)
+  const generationGroups = useMemo(
+    () => groupVersionsByGeneration(dataset.versions),
+    [dataset.versions]
+  );
+
+  // Compute visible columns based on which G_n groups are expanded vs collapsed
+  const visibleColumns = useMemo<VisibleColumn[]>(() => {
+    const cols: VisibleColumn[] = [];
+    for (const grp of generationGroups) {
+      const isCollapsed = collapsedGenerations.has(grp.generationId) && grp.versions.length > 1;
+      if (isCollapsed) {
+        const lastVer = grp.versions[grp.versions.length - 1];
+        cols.push({
+          colId: `GEN::${grp.generationId}`,
+          generationId: grp.generationId,
+          generationName: grp.generationName,
+          isCondensedGen: true,
+          versions: grp.versions,
+          primaryVersion: lastVer,
+          labelTop: grp.generationId,
+          labelSub: grp.generationName,
+          milestoneLabel: grp.milestoneLabel,
+          isMilestone: Boolean(grp.milestoneLabel),
+        });
+      } else {
+        for (const ver of grp.versions) {
+          cols.push({
+            colId: ver.versionKey,
+            generationId: grp.generationId,
+            generationName: grp.generationName,
+            isCondensedGen: false,
+            versions: [ver],
+            primaryVersion: ver,
+            labelTop: ver.engineeringGenId || ver.versionKey,
+            labelSub: ver.phaseName,
+            milestoneLabel: ver.milestoneLabel || ver.milestoneBadge,
+            isMilestone: ver.isMilestone,
+          });
+        }
+      }
+    }
+    return cols;
+  }, [generationGroups, collapsedGenerations]);
+
+  // Map every versionKey -> active colId (so arrows route accurately even when a G_n is collapsed!)
+  const colIdByVersionKey = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const col of visibleColumns) {
+      for (const v of col.versions) map.set(v.versionKey, col.colId);
+    }
+    return map;
+  }, [visibleColumns]);
+
+  // Precompute stacked CV / AV / PV variation shares per visible column (Model of SGE bar!)
+  const variationSharesByColId = useMemo(() => {
+    const map = new Map<string, { cv: number; av: number; pv: number; rem: number; total: number }>();
+    for (const col of visibleColumns) {
+      const kpi = computeVersionKpis(dataset, col.primaryVersion);
+      const cv = kpi.countsByVariation.CV;
+      const av = kpi.countsByVariation.AV;
+      const pv = kpi.countsByVariation.PV;
+      const rem = kpi.countsByVariation.REM;
+      map.set(col.colId, { cv, av, pv, rem, total: Math.max(1, cv + av + pv + rem) });
+    }
+    return map;
+  }, [visibleColumns, dataset]);
 
   // Index events by `${rseId}::${versionKey}`
-  const eventByNodeKey = useMemo(() => {
+  const eventByVerKey = useMemo(() => {
     const map = new Map<string, RsePhaseEvent>();
     for (const ev of dataset.events) {
       const vk = versionKeyByNr.get(ev.versionNr);
@@ -178,7 +270,7 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
   }, [dataset.events, versionKeyByNr]);
 
   // Index micro-iterations by `${rseId}::${versionKey}`
-  const microByNodeKey = useMemo(() => {
+  const microByVerKey = useMemo(() => {
     const map = new Map<string, typeof dataset.microIterations>();
     for (const m of dataset.microIterations) {
       const vk = m.versionNr ? versionKeyByNr.get(m.versionNr) : undefined;
@@ -191,7 +283,6 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
     return map;
   }, [dataset.microIterations, versionKeyByNr]);
 
-  // Filter RSEs by search query
   const visibleRseByLane = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const byLane = new Map<string, typeof dataset.rseList>();
@@ -208,14 +299,13 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
     return byLane;
   }, [dataset.lanes, dataset.rseList, searchQuery]);
 
-  // Resolve all 50 causal arrows onto (RSE_ID, Version_Key) node keys
+  // Resolve causal arrows onto visible column IDs
   const resolvedArrows = useMemo<ResolvedArrow[]>(() => {
     const stepMap = new Map(dataset.steps.map((s) => [s.id, s]));
     const list: ResolvedArrow[] = [];
 
     for (const arrow of dataset.arrows) {
       if (!enabledArrowTypes.includes(arrow.category)) continue;
-
       const sFrom = stepMap.get(arrow.from);
       const sTo = stepMap.get(arrow.to);
 
@@ -228,17 +318,17 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
 
       if (!fromRseId || !toRseId || !fromVerKey || !toVerKey) continue;
 
+      const fromCol = colIdByVersionKey.get(fromVerKey);
+      const toCol = colIdByVersionKey.get(toVerKey);
+      if (!fromCol || !toCol) continue;
+
       const fromRse = rseById.get(fromRseId);
       const toRse = rseById.get(toRseId);
       const fromCollapsed = fromRse ? collapsedLanes.has(fromRse.spur) : false;
       const toCollapsed = toRse ? collapsedLanes.has(toRse.spur) : false;
 
-      const fromKey = fromCollapsed
-        ? `LANE::${fromRse!.spur}::${fromVerKey}`
-        : `${fromRseId}::${fromVerKey}`;
-      const toKey = toCollapsed
-        ? `LANE::${toRse!.spur}::${toVerKey}`
-        : `${toRseId}::${toVerKey}`;
+      const fromKey = fromCollapsed ? `LANE::${fromRse!.spur}::${fromCol}` : `${fromRseId}::${fromCol}`;
+      const toKey = toCollapsed ? `LANE::${toRse!.spur}::${toCol}` : `${toRseId}::${toCol}`;
 
       list.push({
         arrow,
@@ -246,16 +336,23 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
         toKey,
         fromRseId,
         toRseId,
-        fromVerKey,
-        toVerKey,
-        sameVersion: fromVerKey === toVerKey,
+        fromLabel: fromVerKey,
+        toLabel: toVerKey,
+        sameColumn: fromCol === toCol,
         sameNode: fromKey === toKey,
       });
     }
     return list;
-  }, [dataset.arrows, dataset.steps, enabledArrowTypes, versionKeyByNr, rseById, collapsedLanes]);
+  }, [
+    dataset.arrows,
+    dataset.steps,
+    enabledArrowTypes,
+    versionKeyByNr,
+    colIdByVersionKey,
+    rseById,
+    collapsedLanes,
+  ]);
 
-  // Measure DOM coordinates of all rendered nodes & lane summary cells
   const measureBoxes = useCallback(() => {
     const contentEl = contentRef.current;
     if (!contentEl) return;
@@ -294,7 +391,7 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
   useLayoutEffect(() => {
     const raf = requestAnimationFrame(measureBoxes);
     return () => cancelAnimationFrame(raf);
-  }, [measureBoxes, dataset, collapsedLanes, detailLevel, onlyChangeEvents, searchQuery, isEdit]);
+  }, [measureBoxes, dataset, collapsedLanes, collapsedGenerations, detailLevel, searchQuery, isEdit]);
 
   useEffect(() => {
     const contentEl = contentRef.current;
@@ -304,11 +401,9 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
     return () => obs.disconnect();
   }, [measureBoxes]);
 
-  // Compute SVG paths for resolved arrows
   const computedArrowPaths = useMemo(() => {
     if (!showArrows) return [];
     const results: { resolved: ResolvedArrow; path: string }[] = [];
-
     for (const resolved of resolvedArrows) {
       const src = nodeBoxes.get(resolved.fromKey);
       const dst = nodeBoxes.get(resolved.toKey);
@@ -316,22 +411,19 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
 
       let path = '';
       if (resolved.sameNode) {
-        // Neat curved self-loop arc above the node (e.g. P_08, P_09)
         const x1 = src.left + src.width * 0.28;
         const x2 = src.left + src.width * 0.72;
         const y = src.top;
-        path = `M ${x1} ${y} C ${x1} ${y - 26}, ${x2} ${y - 26}, ${x2} ${y - 2}`;
-      } else if (resolved.sameVersion) {
-        // Same version column -> curved S-arc bowing to the right of the column
+        path = `M ${x1} ${y} C ${x1} ${y - 24}, ${x2} ${y - 24}, ${x2} ${y - 2}`;
+      } else if (resolved.sameColumn) {
         const x1 = src.right;
         const y1 = src.cy;
         const x2 = dst.right;
         const y2 = dst.cy;
         const dist = Math.abs(y2 - y1);
-        const bow = Math.min(82, Math.max(30, dist * 0.16));
+        const bow = Math.min(76, Math.max(28, dist * 0.16));
         path = `M ${x1} ${y1} C ${x1 + bow} ${y1}, ${x2 + bow} ${y2}, ${x2 + 2} ${y2}`;
       } else if (src.cx <= dst.cx) {
-        // Forward cross-version arrow (left -> right)
         const x1 = src.right;
         const y1 = src.cy;
         const x2 = dst.left;
@@ -339,7 +431,6 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
         const dx = Math.max(42, (x2 - x1) * 0.45);
         path = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2 - 2} ${y2}`;
       } else {
-        // Backward arrow
         const x1 = src.left;
         const y1 = src.cy;
         const x2 = dst.right;
@@ -347,22 +438,28 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
         const dx = Math.max(42, (x1 - x2) * 0.45);
         path = `M ${x1} ${y1} C ${x1 - dx} ${y1}, ${x2 + dx} ${y2}, ${x2 + 2} ${y2}`;
       }
-
       results.push({ resolved, path });
     }
     return results;
   }, [showArrows, resolvedArrows, nodeBoxes]);
 
-  // Active highlight set when hovering a node or arrow
+  const arrowConnectedNodeKeys = useMemo(() => {
+    const set = new Set<string>();
+    if (!showArrows) return set;
+    for (const ra of resolvedArrows) {
+      set.add(ra.fromKey);
+      set.add(ra.toKey);
+    }
+    return set;
+  }, [showArrows, resolvedArrows]);
+
   const activeArrowIds = useMemo(() => {
     if (hoveredArrowId) return new Set([hoveredArrowId]);
     if (selectedArrowId) return new Set([selectedArrowId]);
     if (hoveredNodeKey) {
       const set = new Set<string>();
       for (const ra of resolvedArrows) {
-        if (ra.fromKey === hoveredNodeKey || ra.toKey === hoveredNodeKey) {
-          set.add(ra.arrow.id);
-        }
+        if (ra.fromKey === hoveredNodeKey || ra.toKey === hoveredNodeKey) set.add(ra.arrow.id);
       }
       return set;
     }
@@ -378,6 +475,15 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
     });
   };
 
+  const toggleGeneration = (genId: string) => {
+    setCollapsedGenerations((prev) => {
+      const next = new Set(prev);
+      if (next.has(genId)) next.delete(genId);
+      else next.add(genId);
+      return next;
+    });
+  };
+
   const toggleArrowCategory = (cat: EdgeCategory) => {
     setEnabledArrowTypes((prev) =>
       prev.includes(cat) ? prev.filter((c) => c !== cat) : [...prev, cat]
@@ -388,8 +494,7 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
     const vp = viewportRef.current;
     if (!vp || contentSize.width === 0) return;
     const scaleX = (vp.clientWidth - 40) / contentSize.width;
-    const clamped = Math.min(1, Math.max(MIN_ZOOM, Number(scaleX.toFixed(2))));
-    setZoom(clamped);
+    setZoom(Math.min(1, Math.max(MIN_ZOOM, Number(scaleX.toFixed(2)))));
     setPan({ x: 16, y: 16 });
   };
 
@@ -403,27 +508,25 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
 
   const handleMouseDownBg = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
-    // Only pan when clicking empty canvas/grid background, not buttons/selects/cards
     const target = e.target as HTMLElement;
-    if (target.closest('button, select, input, [data-interactive-node]')) return;
+    if (target.closest('button, select, input, table, [data-interactive-node]')) return;
     setIsPanning(true);
     panStartRef.current = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y };
   };
-
   const handleMouseMoveBg = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!isPanning || !panStartRef.current) return;
-    const dx = e.clientX - panStartRef.current.x;
-    const dy = e.clientY - panStartRef.current.y;
-    setPan({ x: panStartRef.current.panX + dx, y: panStartRef.current.panY + dy });
+    setPan({
+      x: panStartRef.current.panX + (e.clientX - panStartRef.current.x),
+      y: panStartRef.current.panY + (e.clientY - panStartRef.current.y),
+    });
   };
-
   const handleMouseUpBg = () => {
     setIsPanning(false);
     panStartRef.current = null;
   };
 
-  const colWidthPx = detailLevel === 3 ? 255 : detailLevel === 2 ? 210 : 172;
-  const gridTemplateColumns = `220px repeat(${dataset.versions.length}, ${colWidthPx}px)`;
+  const colWidthPx = detailLevel === 3 ? 286 : detailLevel === 2 ? 236 : 204;
+  const gridTemplateColumns = `224px repeat(${visibleColumns.length}, ${colWidthPx}px)`;
 
   const getMediaPreview = (ev: RsePhaseEvent | undefined, rseId: string): string | undefined => {
     if (ev?.mediaRef && mediaMap[ev.mediaRef]?.dataUrl) return mediaMap[ev.mediaRef].dataUrl;
@@ -432,11 +535,14 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
     return undefined;
   };
 
+  const expandableGenIds = generationGroups.filter((g) => g.versions.length > 1).map((g) => g.generationId);
+  const anyGenCollapsed = collapsedGenerations.size > 0;
+
   return (
     <div className="flex flex-1 flex-col overflow-hidden bg-[#F8FAFC] dark:bg-[#0B1120]">
-      {/* 2D Graph Controls & Arrow Legend Bar */}
+      {/* Clean Top Controls Bar: Arrow Legend + G_n Collapse + Zoom */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-4 py-2 text-xs dark:border-slate-800 dark:bg-slate-900">
-        {/* Left: Arrow Toggle + Legend Filter Pills */}
+        {/* Left: Arrow Toggle + Legend */}
         <div className="flex flex-wrap items-center gap-1.5">
           <button
             type="button"
@@ -449,7 +555,7 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
             }`}
           >
             {showArrows ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-            <span>Pfeile ({computedArrowPaths.length})</span>
+            <span>Wirkpfeile ({computedArrowPaths.length})</span>
           </button>
 
           {showArrows &&
@@ -469,17 +575,17 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                       : 'border-slate-200 bg-slate-100 text-slate-400 opacity-50 dark:border-slate-800 dark:bg-slate-900'
                   }`}
                 >
-                  <svg width="20" height="8" aria-hidden="true">
+                  <svg width="18" height="8" aria-hidden="true">
                     <line
                       x1="0"
                       y1="4"
-                      x2="15"
+                      x2="13"
                       y2="4"
                       stroke={stroke}
                       strokeWidth={Math.min(3, st.strokeWidth)}
                       strokeDasharray={st.dashArray}
                     />
-                    <polygon points="14,1.5 20,4 14,6.5" fill={stroke} />
+                    <polygon points="12,1.5 18,4 12,6.5" fill={stroke} />
                   </svg>
                   <span>{st.shortLabel}</span>
                 </button>
@@ -487,7 +593,7 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
             })}
         </div>
 
-        {/* Right: Edit Actions + Collapse/Expand + Only Changes + Zoom Controls */}
+        {/* Right: Edit Actions + G_n / E_{n,m} Toggle + Lane Collapse + Zoom */}
         <div className="flex flex-wrap items-center gap-1.5">
           {isEdit && (
             <>
@@ -510,29 +616,27 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
             </>
           )}
 
-          <button
-            type="button"
-            onClick={() => setOnlyChangeEvents((p) => !p)}
-            className={`rounded-md border px-2 py-1 text-[11px] font-medium transition-colors ${
-              onlyChangeEvents
-                ? 'border-orange-400 bg-orange-50 text-orange-900 dark:border-orange-700 dark:bg-orange-950/60 dark:text-orange-200'
-                : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300'
-            }`}
-            title="Carry-over-Knoten (CV) ausblenden, um nur Änderungen hervorzuheben"
-          >
-            {onlyChangeEvents ? 'Nur Änderungen (ohne CV)' : 'Alle Knoten (inkl. CV)'}
-          </button>
+          {expandableGenIds.length > 0 && (
+            <button
+              type="button"
+              onClick={() =>
+                setCollapsedGenerations(anyGenCollapsed ? new Set() : new Set(expandableGenIds))
+              }
+              className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+              title="Zwischen verdichteter Generationensicht (G₀–G₃) und vollständigen Engineering Generations (Eₙ,ₘ) umschalten"
+            >
+              {anyGenCollapsed ? 'Eₙ,ₘ ausklappen' : 'Auf G₀–G₃ verdichten'}
+            </button>
+          )}
 
           <button
             type="button"
             onClick={() =>
-              setCollapsedLanes(
-                collapsedLanes.size > 0 ? new Set() : new Set(dataset.lanes)
-              )
+              setCollapsedLanes(collapsedLanes.size > 0 ? new Set() : new Set(dataset.lanes))
             }
             className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
           >
-            {collapsedLanes.size > 0 ? 'Alle Spuren ausklappen' : 'Alle einklappen'}
+            {collapsedLanes.size > 0 ? 'Spuren ausklappen' : 'Spuren einklappen'}
           </button>
 
           {/* Zoom Controls */}
@@ -541,18 +645,18 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
               type="button"
               onClick={() => setZoom((z) => Math.max(MIN_ZOOM, Number((z - 0.1).toFixed(2))))}
               aria-label="Herauszoomen"
-              className="px-1.5 py-1 text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700"
+              className="px-1.5 py-1 text-slate-600 hover:bg-slate-100 dark:text-slate-300"
             >
               <Minus className="h-3.5 w-3.5" />
             </button>
-            <span className="min-w-[42px] text-center font-mono text-[10px] font-semibold tabular-nums text-slate-700 dark:text-slate-200">
+            <span className="min-w-[40px] text-center font-mono text-[10px] font-semibold tabular-nums text-slate-700 dark:text-slate-200">
               {Math.round(zoom * 100)}%
             </span>
             <button
               type="button"
               onClick={() => setZoom((z) => Math.min(MAX_ZOOM, Number((z + 0.1).toFixed(2))))}
               aria-label="Hineinzoomen"
-              className="px-1.5 py-1 text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700"
+              className="px-1.5 py-1 text-slate-600 hover:bg-slate-100 dark:text-slate-300"
             >
               <Plus className="h-3.5 w-3.5" />
             </button>
@@ -567,7 +671,7 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
             <button
               type="button"
               onClick={() => {
-                setZoom(0.9);
+                setZoom(0.88);
                 setPan({ x: 16, y: 16 });
               }}
               title="Zoom & Position zurücksetzen"
@@ -579,7 +683,7 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
         </div>
       </div>
 
-      {/* Interactive Zoom/Pan 2D Canvas */}
+      {/* 2D Zoom/Pan Engineering Canvas */}
       <div
         ref={viewportRef}
         onWheel={handleWheel}
@@ -600,7 +704,7 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
             transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
             transformOrigin: '0 0',
           }}
-          className="relative inline-block min-w-max pb-24 pr-24"
+          className="relative inline-block min-w-max pb-28 pr-28"
         >
           {/* SVG Causal Arrow Overlay */}
           {showArrows && (
@@ -641,21 +745,21 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                   : hoveredArrowId === arrow.id
                     ? style.strokeWidth + 1
                     : style.strokeWidth;
-
-                const firstCause = arrow.causeIds.length > 0 ? causeById.get(arrow.causeIds[0]) : undefined;
+                const firstCause =
+                  arrow.causeIds.length > 0 ? causeById.get(arrow.causeIds[0]) : undefined;
 
                 return (
                   <g
                     key={arrow.id}
                     className="pointer-events-auto cursor-pointer"
-                    style={{ opacity: isHighlighted ? 0.92 : 0.14, transition: 'opacity 140ms' }}
+                    style={{ opacity: isHighlighted ? 0.9 : 0.12, transition: 'opacity 140ms' }}
                     onMouseEnter={(e) => {
                       setHoveredArrowId(arrow.id);
                       setTooltip({
                         x: e.clientX,
                         y: e.clientY,
                         badge: arrow.id,
-                        title: `${resolved.fromRseId} (${resolved.fromVerKey}) → ${resolved.toRseId} (${resolved.toVerKey})`,
+                        title: `${resolved.fromRseId} (${resolved.fromLabel}) → ${resolved.toRseId} (${resolved.toLabel})`,
                         subtitle: arrow.arrowType,
                         rationale: arrow.rationale,
                         causeLabel: firstCause
@@ -663,11 +767,9 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                           : arrow.causeIdRaw || undefined,
                       });
                     }}
-                    onMouseMove={(e) => {
-                      setTooltip((prev) =>
-                        prev ? { ...prev, x: e.clientX, y: e.clientY } : prev
-                      );
-                    }}
+                    onMouseMove={(e) =>
+                      setTooltip((prev) => (prev ? { ...prev, x: e.clientX, y: e.clientY } : prev))
+                    }
                     onMouseLeave={() => {
                       setHoveredArrowId(null);
                       setTooltip(null);
@@ -677,9 +779,7 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                       onSelectArrow(arrow.id);
                     }}
                   >
-                    {/* Wide invisible hit path for easy hover/click */}
                     <path d={path} fill="none" stroke="transparent" strokeWidth={14} />
-                    {/* Visible styled arrow */}
                     <path
                       d={path}
                       fill="none"
@@ -695,60 +795,188 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
             </svg>
           )}
 
-          {/* X-Axis Header Row: Versions v0.0 .. v2.2 with Milestone Badges */}
-          <div
-            style={{ gridTemplateColumns }}
-            className="sticky top-0 z-10 grid items-stretch rounded-t-xl border border-slate-300 bg-white shadow-xs dark:border-slate-700 dark:bg-slate-900"
-          >
-            <div className="flex items-center justify-between border-r border-slate-200 px-3 py-2.5 text-xs font-bold text-slate-700 dark:border-slate-800 dark:text-slate-200">
-              <span>Systemspur / RSE</span>
-              <span className="font-mono text-[10px] font-normal text-slate-400">
-                {dataset.rseList.length} RSE
-              </span>
+          {/* TWO-LEVEL SGE GENERATION HEADER (Level 1: System Generations G_0..G_3, Level 2: Engineering Generations E_{n,m} + CV/AV/PV Stacked Share Bar) */}
+          <div className="sticky top-0 z-10 overflow-hidden rounded-t-xl border border-slate-300 bg-white shadow-xs dark:border-slate-700 dark:bg-slate-900">
+            {/* Level 1: System Generations Band (G_0 .. G_3) */}
+            <div
+              style={{ gridTemplateColumns }}
+              className="grid border-b border-slate-200 bg-slate-100/90 dark:border-slate-800 dark:bg-slate-950/80"
+            >
+              <div className="flex items-center border-r border-slate-200 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:border-slate-800">
+                Systemgeneration (Gₙ)
+              </div>
+
+              {generationGroups.map((grp) => {
+                const isCollapsed =
+                  collapsedGenerations.has(grp.generationId) && grp.versions.length > 1;
+                const spanCols = isCollapsed ? 1 : grp.versions.length;
+                const canCollapse = grp.versions.length > 1;
+
+                return (
+                  <div
+                    key={grp.generationId}
+                    style={{ gridColumn: `span ${spanCols} / span ${spanCols}` }}
+                    className="flex items-center justify-between gap-2 border-r border-slate-200 px-3 py-1.5 last:border-r-0 dark:border-slate-800"
+                  >
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="rounded bg-slate-900 px-1.5 py-0.5 font-mono text-[11px] font-bold text-white dark:bg-blue-600 shrink-0">
+                        {grp.generationId}
+                      </span>
+                      <span className="truncate text-xs font-bold text-slate-900 dark:text-white">
+                        {grp.generationName}
+                      </span>
+                      {grp.milestoneLabel && (
+                        <span className="hidden sm:inline-flex items-center gap-0.5 rounded-full border border-amber-300 bg-amber-50 px-1.5 py-0.2 font-mono text-[9.5px] font-bold text-amber-900 dark:border-amber-700 dark:bg-amber-950/70 dark:text-amber-200 shrink-0">
+                          <Flag className="h-2.5 w-2.5" />
+                          {grp.milestoneLabel}
+                        </span>
+                      )}
+                    </div>
+
+                    {canCollapse && (
+                      <button
+                        type="button"
+                        onClick={() => toggleGeneration(grp.generationId)}
+                        className="inline-flex items-center gap-0.5 rounded border border-slate-300 bg-white px-1.5 py-0.5 font-mono text-[10px] font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 shrink-0"
+                        title={
+                          isCollapsed
+                            ? `Engineering Generations (${grp.versions.map((v) => v.engineeringGenId).join(', ')}) ausklappen`
+                            : `Auf ${grp.generationId} verdichten`
+                        }
+                      >
+                        {isCollapsed ? (
+                          <>
+                            <ChevronRight className="h-3 w-3" />
+                            <span>{grp.versions.length} Eₙ,ₘ</span>
+                          </>
+                        ) : (
+                          <>
+                            <ChevronDown className="h-3 w-3" />
+                            <span>Verdichten</span>
+                          </>
+                        )}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
 
-            {dataset.versions.map((ver) => (
-              <div
-                key={ver.versionKey}
-                className={`border-r border-slate-200 px-2.5 py-2 last:border-r-0 dark:border-slate-800 ${
-                  ver.isMilestone ? 'bg-amber-50/60 dark:bg-amber-950/25' : ''
-                }`}
-              >
-                <div className="flex items-center justify-between gap-1">
-                  <span className="font-mono text-xs font-bold text-slate-900 dark:text-white">
-                    {ver.versionKey}
-                  </span>
-                  {isEdit && (
-                    <button
-                      type="button"
-                      onClick={() => onOpenModal({ kind: 'edit-version', version: ver })}
-                      title="Version / Meilenstein bearbeiten"
-                      className="rounded p-0.5 text-slate-400 hover:bg-slate-200/70 hover:text-slate-800"
-                    >
-                      <Edit3 className="h-3 w-3" />
-                    </button>
-                  )}
-                </div>
-                <div className="truncate text-[11px] font-medium text-slate-600 dark:text-slate-300">
-                  {ver.phaseName.replace(ver.versionKey, '').trim()}
-                </div>
-                {ver.milestoneBadge && (
+            {/* Level 2: Engineering Generations E_{n,m} + Stacked CV/AV/PV Share Bar */}
+            <div style={{ gridTemplateColumns }} className="grid items-stretch">
+              <div className="flex flex-col justify-center border-r border-slate-200 px-3 py-2 text-xs font-bold text-slate-700 dark:border-slate-800 dark:text-slate-200">
+                <span>Systemspur / RSE</span>
+                <span className="text-[10px] font-normal text-slate-400">
+                  Nur aktive Änderungen (keine {formatVariationCode('CV', lang)}-Kästen)
+                </span>
+              </div>
+
+              {visibleColumns.map((col) => {
+                const share = variationSharesByColId.get(col.colId) ?? {
+                  cv: 0,
+                  av: 0,
+                  pv: 0,
+                  rem: 0,
+                  total: 1,
+                };
+                const cvPct = Math.round((share.cv / share.total) * 100);
+                const avPct = Math.round((share.av / share.total) * 100);
+                const pvPct = Math.round(((share.pv + share.rem) / share.total) * 100);
+
+                return (
                   <div
-                    className={`mt-1 inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-bold ${
-                      ver.isMilestone
-                        ? 'border-amber-300 bg-amber-100 text-amber-900 dark:border-amber-700 dark:bg-amber-900/60 dark:text-amber-200'
-                        : 'border-slate-200 bg-slate-100 text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                    key={col.colId}
+                    className={`flex flex-col justify-between border-r border-slate-200 px-2.5 py-2 last:border-r-0 dark:border-slate-800 ${
+                      col.isMilestone ? 'bg-amber-50/45 dark:bg-amber-950/20' : ''
                     }`}
                   >
-                    {ver.isMilestone && <Flag className="h-2.5 w-2.5 shrink-0" />}
-                    <span className="truncate max-w-[140px]">{ver.milestoneBadge}</span>
+                    <div>
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="font-mono text-xs font-bold text-slate-900 dark:text-white">
+                          {col.labelTop}
+                        </span>
+                        <div className="flex items-center gap-1">
+                          {col.milestoneLabel && (
+                            <span className="rounded bg-amber-100 px-1.5 py-0.2 font-mono text-[9px] font-bold text-amber-900 dark:bg-amber-900/60 dark:text-amber-200">
+                              {col.milestoneLabel}
+                            </span>
+                          )}
+                          {isEdit && !col.isCondensedGen && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onOpenModal({ kind: 'edit-version', version: col.primaryVersion })
+                              }
+                              title="Engineering Generation bearbeiten"
+                              className="rounded p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-800"
+                            >
+                              <Edit3 className="h-3 w-3" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <div
+                        className="truncate text-[10.5px] font-medium text-slate-500 dark:text-slate-400"
+                        title={col.labelSub}
+                      >
+                        {col.labelSub}
+                      </div>
+                    </div>
+
+                    {/* Stacked CV / AV / PV Share Bar (Albers et al. Model of SGE) */}
+                    <div className="mt-2">
+                      <div
+                        className="flex h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800"
+                        title={`${formatVariationCode('CV', lang)} ${cvPct}% · AV ${avPct}% · PV ${pvPct}%`}
+                      >
+                        {share.cv > 0 && (
+                          <div
+                            style={{
+                              width: `${(share.cv / share.total) * 100}%`,
+                              backgroundColor: VARIATION_MARKER_COLORS.CV.dot,
+                            }}
+                          />
+                        )}
+                        {share.av > 0 && (
+                          <div
+                            style={{
+                              width: `${(share.av / share.total) * 100}%`,
+                              backgroundColor: VARIATION_MARKER_COLORS.AV.dot,
+                            }}
+                          />
+                        )}
+                        {share.pv > 0 && (
+                          <div
+                            style={{
+                              width: `${(share.pv / share.total) * 100}%`,
+                              backgroundColor: VARIATION_MARKER_COLORS.PV.dot,
+                            }}
+                          />
+                        )}
+                        {share.rem > 0 && (
+                          <div
+                            style={{
+                              width: `${(share.rem / share.total) * 100}%`,
+                              backgroundColor: VARIATION_MARKER_COLORS.REM.dot,
+                            }}
+                          />
+                        )}
+                      </div>
+                      <div className="mt-0.5 flex items-center justify-between font-mono text-[9px] tabular-nums text-slate-500 dark:text-slate-400">
+                        <span style={{ color: VARIATION_MARKER_COLORS.CV.dot }}>
+                          {formatVariationCode('CV', lang)} {cvPct}%
+                        </span>
+                        <span style={{ color: VARIATION_MARKER_COLORS.AV.dot }}>AV {avPct}%</span>
+                        <span style={{ color: VARIATION_MARKER_COLORS.PV.dot }}>PV {pvPct}%</span>
+                      </div>
+                    </div>
                   </div>
-                )}
-              </div>
-            ))}
+                );
+              })}
+            </div>
           </div>
 
-          {/* Y-Axis: 9 Collapsible Swimlanes with Individual RSE Rows */}
+          {/* Y-AXIS: 9 Collapsible Swimlanes with Individual RSE Rows */}
           <div className="divide-y divide-slate-300 rounded-b-xl border-x border-b border-slate-300 bg-white/95 dark:divide-slate-700 dark:border-slate-700 dark:bg-slate-900/95">
             {dataset.lanes.map((spurId) => {
               const laneRses = visibleRseByLane.get(spurId) ?? [];
@@ -809,50 +1037,48 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                       </div>
                     </div>
 
-                    {/* Collapsed lane summary cells (act as arrow anchors when collapsed!) */}
-                    {dataset.versions.map((ver) => {
+                    {visibleColumns.map((col) => {
                       if (!isCollapsed) {
                         return (
                           <div
-                            key={ver.versionKey}
-                            className="border-r border-slate-200/60 px-2 py-1.5 text-[10px] text-slate-400 last:border-r-0 dark:border-slate-700/60"
+                            key={col.colId}
+                            className="border-r border-slate-200/60 px-2 py-1.5 last:border-r-0 dark:border-slate-700/60"
                           />
                         );
                       }
 
-                      const activeInLane = laneRses.filter((r) => {
-                        const st = matrixByRse.get(r.rseId)?.statusByVersionKey[ver.versionKey];
-                        return Boolean(st) && st !== 'REM';
-                      }).length;
-                      const changedInLane = laneRses.filter((r) => {
-                        const st = matrixByRse.get(r.rseId)?.statusByVersionKey[ver.versionKey];
-                        return Boolean(st) && st !== 'CV' && st !== 'BASE';
-                      }).length;
+                      // Count real development activities (non-CV) inside this lane & column
+                      let devCount = 0;
+                      for (const r of laneRses) {
+                        const hasActivity = col.versions.some((v) => {
+                          const ev = eventByVerKey.get(`${r.rseId}::${v.versionKey}`);
+                          return ev && ev.statusCode !== 'CV';
+                        });
+                        if (hasActivity) devCount++;
+                      }
 
                       return (
                         <div
-                          key={ver.versionKey}
-                          data-node-key={`LANE::${spurId}::${ver.versionKey}`}
+                          key={col.colId}
+                          data-node-key={`LANE::${spurId}::${col.colId}`}
                           className="border-r border-slate-200/70 px-2 py-1.5 text-center last:border-r-0 dark:border-slate-700/70"
                         >
-                          <span className="inline-flex items-center gap-1 rounded bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-700 shadow-2xs dark:bg-slate-900 dark:text-slate-200">
-                            <span>{activeInLane} aktiv</span>
-                            {changedInLane > 0 && (
-                              <span className="text-orange-700 dark:text-orange-300">
-                                · {changedInLane} Δ
-                              </span>
-                            )}
-                          </span>
+                          {devCount > 0 ? (
+                            <span className="inline-flex items-center gap-1 rounded bg-white px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-700 shadow-2xs dark:bg-slate-900 dark:text-slate-200">
+                              <span>{devCount} Änderungen</span>
+                            </span>
+                          ) : (
+                            <span className="font-mono text-[10px] text-slate-400">·</span>
+                          )}
                         </div>
                       );
                     })}
                   </div>
 
-                  {/* Individual RSE Rows (Y-Axis) */}
+                  {/* Individual RSE Rows */}
                   {!isCollapsed && (
                     <div className="divide-y divide-slate-100 dark:divide-slate-800/80">
                       {laneRses.map((rse) => {
-                        const matRow = matrixByRse.get(rse.rseId);
                         const isSelectedRow = selectedRseId === rse.rseId;
 
                         return (
@@ -861,11 +1087,11 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                             style={{ gridTemplateColumns }}
                             className={`grid items-stretch transition-colors ${
                               isSelectedRow
-                                ? 'bg-blue-50/45 dark:bg-blue-950/20'
-                                : 'hover:bg-slate-50/70 dark:hover:bg-slate-800/30'
+                                ? 'bg-blue-50/40 dark:bg-blue-950/20'
+                                : 'hover:bg-slate-50/60 dark:hover:bg-slate-800/25'
                             }`}
                           >
-                            {/* Sticky-feeling RSE Row Label */}
+                            {/* RSE Row Label */}
                             <div className="flex items-center justify-between gap-1.5 border-r border-slate-200 px-3 py-2 dark:border-slate-800">
                               <button
                                 type="button"
@@ -912,23 +1138,38 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                               )}
                             </div>
 
-                            {/* Version Cells (v0.0 .. v2.2) */}
-                            {dataset.versions.map((ver, verIdx) => {
-                              const nodeKey = `${rse.rseId}::${ver.versionKey}`;
-                              const statusCode = matRow?.statusByVersionKey[ver.versionKey] ?? '';
-                              const ev = eventByNodeKey.get(nodeKey);
-                              const micros = microByNodeKey.get(nodeKey) ?? [];
-                              const hasPhoto = Boolean(getMediaPreview(ev, rse.rseId));
+                            {/* Version / Generation Cells: ZERO boxes for pure CV! */}
+                            {visibleColumns.map((col) => {
+                              const nodeKey = `${rse.rseId}::${col.colId}`;
 
-                              const shouldHideCv =
-                                onlyChangeEvents && statusCode === 'CV' && !ev;
+                              // Find real (non-CV) development event(s) in this column
+                              const colEvents = col.versions
+                                .map((v) => eventByVerKey.get(`${rse.rseId}::${v.versionKey}`))
+                                .filter((e): e is RsePhaseEvent => e !== undefined && e.statusCode !== 'CV');
 
-                              if (!statusCode || shouldHideCv) {
+                              const activeEv = colEvents[colEvents.length - 1] ?? null;
+
+                              // If pure CV or inactive -> CLEAN EMPTY CELL (no box, no text noise!)
+                              if (!activeEv) {
                                 return (
                                   <div
-                                    key={ver.versionKey}
-                                    className="group/cell flex items-center justify-center border-r border-slate-100 p-1.5 last:border-r-0 dark:border-slate-800/70"
+                                    key={col.colId}
+                                    className="group/cell relative flex items-center justify-center border-r border-slate-100 p-2 last:border-r-0 dark:border-slate-800/70"
                                   >
+                                    {/* Anchor for incoming/outgoing arrows: visible crisp junction dot ONLY if connected */}
+                                    <span
+                                      data-node-key={nodeKey}
+                                      title={
+                                        arrowConnectedNodeKeys.has(nodeKey)
+                                          ? `${rse.rseId} (${col.labelTop}): Carryover-Ankerpunkt eines Wirkpfeils`
+                                          : undefined
+                                      }
+                                      className={
+                                        arrowConnectedNodeKeys.has(nodeKey)
+                                          ? 'h-2.5 w-2.5 rounded-full border-2 border-slate-400 bg-white shadow-xs dark:border-slate-500 dark:bg-slate-900'
+                                          : 'pointer-events-none h-1 w-1'
+                                      }
+                                    />
                                     {isEdit && (
                                       <button
                                         type="button"
@@ -937,26 +1178,36 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                                           onOpenModal({
                                             kind: 'upsert-event',
                                             rseId: rse.rseId,
-                                            versionKey: ver.versionKey,
+                                            versionKey: col.primaryVersion.versionKey,
                                           })
                                         }
-                                        title={`Neues Event für ${rse.rseId} in ${ver.versionKey} hinzufügen`}
-                                        className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-dashed border-slate-300 text-slate-400 opacity-0 transition-opacity hover:border-blue-500 hover:bg-blue-50 hover:text-blue-600 group-hover/cell:opacity-100 dark:border-slate-700"
+                                        title={`Neuen Entwicklungskasten (AV/PV) für ${rse.rseId} in ${col.labelTop} anlegen`}
+                                        className="inline-flex items-center gap-1 rounded-md border border-dashed border-slate-300 bg-white/90 px-2 py-1 text-[10px] font-semibold text-slate-500 opacity-0 transition-opacity hover:border-blue-500 hover:bg-blue-50 hover:text-blue-700 group-hover/cell:opacity-100 dark:border-slate-700 dark:bg-slate-900"
                                       >
-                                        <Plus className="h-3.5 w-3.5" />
+                                        <Plus className="h-3 w-3" />
+                                        <span>AV / PV</span>
                                       </button>
                                     )}
                                   </div>
                                 );
                               }
 
-                              const sw = getSwatchForStatus(
-                                statusCode,
-                                colorMode,
-                                palette,
-                                rse.currentLifecycle
+                              // Real development activity (BASE in G_0, AV, PV, NEW, REM)!
+                              const statusCode = activeEv.statusCode;
+                              const varKind = statusCodeToVariationKind(statusCode);
+                              const markerKey = statusCode === 'BASE' ? 'BASE' : varKind;
+                              const marker = VARIATION_MARKER_COLORS[markerKey];
+                              const isRemoved = statusCode === 'REM';
+                              const isUnplanned = statusCode === 'UD-AV' || statusCode === 'UD-PV';
+
+                              const kombisAtNode = activeEv.kombiPartIds;
+                              const micros = col.versions.flatMap(
+                                (v) => microByVerKey.get(`${rse.rseId}::${v.versionKey}`) ?? []
                               );
-                              const kombisAtNode = ev?.kombiPartIds ?? [];
+                              const linkedCauses = getCausesForEvent(activeEv, dataset);
+                              const linkedLearnings = getLearningsForEvent(activeEv, dataset);
+                              const previewImg = getMediaPreview(activeEv, rse.rseId);
+
                               const matchesFilter =
                                 activeColorFilters.length === 0 ||
                                 activeColorFilters.some((g) =>
@@ -964,15 +1215,15 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                                     ? kombisAtNode.length > 0 || rse.currentKombiIds.length > 0
                                     : statusCodeToColorGroup(statusCode) === g
                                 );
-                              const isCvGhost = statusCode === 'CV' && !ev;
-                              const linkedCauses = ev ? getCausesForEvent(ev, dataset) : [];
-                              const linkedLearnings = ev ? getLearningsForEvent(ev, dataset) : [];
+
+                              const verIdx = versionIndexByKey.get(col.primaryVersion.versionKey);
 
                               return (
                                 <div
-                                  key={ver.versionKey}
-                                  className="flex items-center border-r border-slate-100 px-2.5 py-2 last:border-r-0 dark:border-slate-800/70"
+                                  key={col.colId}
+                                  className="group/cell relative flex flex-col justify-center border-r border-slate-100 px-2.5 py-2 last:border-r-0 dark:border-slate-800/70"
                                 >
+                                  {/* Neutral High-Contrast Card with Color Dot + Subtle Corner Accent */}
                                   <div
                                     data-node-key={nodeKey}
                                     data-interactive-node="true"
@@ -987,75 +1238,101 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                                     }}
                                     onMouseEnter={(e) => {
                                       setHoveredNodeKey(nodeKey);
-                                      const firstCause = linkedCauses[0];
+                                      const c0 = linkedCauses[0];
                                       setTooltip({
                                         x: e.clientX,
                                         y: e.clientY,
-                                        badge: statusCode,
-                                        badgeSwatch: sw,
+                                        badge: formatStatusCodeDisplay(statusCode, lang),
+                                        badgeSwatch: {
+                                          bg: marker.bg,
+                                          border: marker.border,
+                                          text: marker.text,
+                                          dashed: isRemoved,
+                                        },
                                         title: `${rse.rseId} · ${rse.name}`,
-                                        subtitle: `${ver.phaseName}${ev ? ` (${ev.eventId})` : ' (Carry over)'}`,
-                                        description: ev?.stateDescription || rse.functionSummary,
-                                        rationale: ev?.rationale || undefined,
-                                        causeLabel: firstCause
-                                          ? `${firstCause.id}: ${firstCause.title}`
-                                          : undefined,
-                                        previewImageUrl: getMediaPreview(ev, rse.rseId),
+                                        subtitle: `${col.labelTop} · ${col.labelSub} (${activeEv.eventId})`,
+                                        description: activeEv.stateDescription || rse.functionSummary,
+                                        rationale: activeEv.rationale || undefined,
+                                        causeLabel: c0 ? `${c0.id}: ${c0.title}` : undefined,
+                                        previewImageUrl: previewImg,
                                       });
                                     }}
-                                    onMouseMove={(e) => {
+                                    onMouseMove={(e) =>
                                       setTooltip((prev) =>
                                         prev ? { ...prev, x: e.clientX, y: e.clientY } : prev
-                                      );
-                                    }}
+                                      )
+                                    }
                                     onMouseLeave={() => {
                                       setHoveredNodeKey(null);
                                       setTooltip(null);
                                     }}
-                                    style={{
-                                      backgroundColor: sw.bg,
-                                      borderColor: sw.border,
-                                      color: sw.text,
-                                      borderStyle: sw.dashed ? 'dashed' : 'solid',
-                                    }}
-                                    className={`relative z-10 w-full cursor-pointer rounded-lg border-2 px-2 py-1.5 text-left transition-all ${
-                                      isCvGhost ? 'opacity-75 hover:opacity-100' : 'shadow-2xs'
+                                    className={`relative z-10 overflow-hidden rounded-lg border bg-white px-2.5 py-2 text-left shadow-2xs transition-all dark:bg-slate-900 ${
+                                      isRemoved
+                                        ? 'border-dashed border-red-400 bg-red-50/25 dark:border-red-700 dark:bg-red-950/20'
+                                        : 'border-slate-300 hover:border-slate-400 dark:border-slate-700 dark:hover:border-slate-500'
                                     } ${!matchesFilter ? 'opacity-20 hover:opacity-80' : ''} ${
                                       hoveredNodeKey === nodeKey
                                         ? 'ring-2 ring-slate-900 dark:ring-white'
                                         : ''
                                     }`}
                                   >
-                                    {/* Top Row: Status Code (or Quick Picker in Edit Mode) + Icons */}
-                                    <div className="flex items-center justify-between gap-1">
-                                      {isEdit ? (
-                                        <select
-                                          value={statusCode}
-                                          onClick={(e) => e.stopPropagation()}
-                                          onChange={(e) =>
-                                            onQuickStatusChange(
-                                              rse.rseId,
-                                              ver.versionKey,
-                                              e.target.value as StatusCode
-                                            )
-                                          }
-                                          aria-label={`ISEM-Farbcode für ${rse.rseId} in ${ver.versionKey}`}
-                                          className="rounded border border-black/20 bg-white/90 px-1 py-0.5 font-mono text-[10px] font-bold text-slate-900"
-                                        >
-                                          {ALL_STATUS_CODES.map((c) => (
-                                            <option key={c} value={c}>
-                                              {c}
-                                            </option>
-                                          ))}
-                                        </select>
-                                      ) : (
+                                    {/* Subtle Colored Corner Accent Triangle (Top-Right) */}
+                                    <span
+                                      aria-hidden="true"
+                                      style={{
+                                        borderTopColor: marker.dot,
+                                      }}
+                                      className="pointer-events-none absolute right-0 top-0 h-0 w-0 border-l-[14px] border-t-[14px] border-l-transparent"
+                                    />
+
+                                    {/* Card Header: Color Dot + Canonical Variation Code + Optional UD flag + Icons */}
+                                    <div className="flex items-center justify-between gap-1 pr-2">
+                                      <div className="flex items-center gap-1.5 min-w-0">
                                         <span
-                                          style={{ borderColor: sw.border }}
-                                          className="rounded border bg-white/80 px-1.5 py-0.2 font-mono text-[10px] font-bold leading-tight"
-                                        >
-                                          {statusCode}
-                                        </span>
-                                      )}
+                                          style={{ backgroundColor: marker.dot }}
+                                          title={activeEv.variationType}
+                                          className="h-2.5 w-2.5 rounded-full shrink-0"
+                                        />
+                                        {isEdit ? (
+                                          <select
+                                            value={statusCode}
+                                            onClick={(e) => e.stopPropagation()}
+                                            onChange={(e) =>
+                                              onQuickStatusChange(
+                                                rse.rseId,
+                                                col.primaryVersion.versionKey,
+                                                e.target.value as StatusCode
+                                              )
+                                            }
+                                            className="rounded border border-slate-300 bg-slate-50 px-1 py-0.2 font-mono text-[10px] font-bold text-slate-900 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                                          >
+                                            {ALL_STATUS_CODES.map((c) => (
+                                              <option key={c} value={c}>
+                                                {formatStatusCodeDisplay(c, lang)}
+                                              </option>
+                                            ))}
+                                          </select>
+                                        ) : (
+                                          <span
+                                            style={{ color: marker.text }}
+                                            className="font-mono text-[10.5px] font-bold tracking-tight"
+                                          >
+                                            {statusCode === 'BASE'
+                                              ? 'G₀'
+                                              : statusCode === 'NEW'
+                                                ? 'PV · Neu'
+                                                : formatVariationCode(varKind, lang)}
+                                          </span>
+                                        )}
+                                        {isUnplanned && !isEdit && (
+                                          <span
+                                            title="Ungeplante Abweichung (UD)"
+                                            className="rounded bg-amber-100 px-1 py-0.2 font-mono text-[9px] font-bold text-amber-900 dark:bg-amber-900/60 dark:text-amber-200"
+                                          >
+                                            UD
+                                          </span>
+                                        )}
+                                      </div>
 
                                       <div className="flex items-center gap-1 shrink-0">
                                         {kombisAtNode.length > 0 && (
@@ -1074,16 +1351,16 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                                         {micros.length > 0 && (
                                           <span
                                             title={`${micros.length} Mikro-Iterationen`}
-                                            className="inline-flex items-center gap-0.5 rounded bg-white/80 px-1 font-mono text-[9px] font-bold text-blue-800"
+                                            className="inline-flex items-center gap-0.5 rounded bg-blue-50 px-1 font-mono text-[9px] font-bold text-blue-800 dark:bg-blue-950/60 dark:text-blue-200"
                                           >
                                             <RefreshCw className="h-2.5 w-2.5" />
                                             {micros.length}
                                           </span>
                                         )}
-                                        {hasPhoto && (
+                                        {previewImg && (
                                           <span
                                             title="Foto hinterlegt"
-                                            className="inline-flex items-center rounded bg-white/80 p-0.5 text-slate-700"
+                                            className="inline-flex items-center rounded bg-slate-100 p-0.5 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
                                           >
                                             <Camera className="h-2.5 w-2.5" />
                                           </span>
@@ -1096,12 +1373,12 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                                               onOpenModal({
                                                 kind: 'upsert-event',
                                                 rseId: rse.rseId,
-                                                versionKey: ver.versionKey,
-                                                existing: ev,
+                                                versionKey: col.primaryVersion.versionKey,
+                                                existing: activeEv,
                                               });
                                             }}
-                                            title="Knoten-Details bearbeiten"
-                                            className="rounded bg-white/80 p-0.5 text-slate-700 hover:bg-white"
+                                            title="Kasten bearbeiten"
+                                            className="rounded p-0.5 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
                                           >
                                             <Edit3 className="h-2.5 w-2.5" />
                                           </button>
@@ -1109,36 +1386,42 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                                       </div>
                                     </div>
 
-                                    {/* Stufe 2 & 3: Short description */}
-                                    {detailLevel >= 2 && ev?.stateDescription && (
-                                      <p className="mt-1 line-clamp-2 text-[10px] leading-snug opacity-95">
-                                        {ev.stateDescription}
+                                    {/* Stufe 2 & 3: Short state description */}
+                                    {detailLevel >= 2 && activeEv.stateDescription && (
+                                      <p className="mt-1 line-clamp-2 text-[10.5px] leading-snug text-slate-700 dark:text-slate-300">
+                                        {activeEv.stateDescription}
                                       </p>
                                     )}
 
-                                    {/* Stufe 3 (Deep Dive): Inline Causes, Micro-Iterations, Learnings & Photo */}
+                                    {/* Stufe 3 (Deep Dive): Micro-Iterations breakdown, Causes, Learnings & object-contain Photo */}
                                     {detailLevel === 3 && (
-                                      <div className="mt-1.5 space-y-1 border-t border-black/10 pt-1 text-[10px]">
+                                      <div className="mt-1.5 space-y-1 border-t border-slate-100 pt-1.5 text-[10px] dark:border-slate-800">
                                         {linkedCauses.length > 0 && (
                                           <div className="space-y-0.5">
                                             {linkedCauses.map((c) => (
                                               <div
                                                 key={c.id}
-                                                className="rounded bg-white/75 px-1.5 py-0.5 text-[9px] text-slate-800"
+                                                className="rounded bg-amber-50/70 px-1.5 py-0.5 text-[9.5px] text-slate-800 dark:bg-amber-950/40 dark:text-slate-200"
                                               >
-                                                <span className="inline-flex items-center gap-0.5 font-mono font-bold text-amber-800">
+                                                <span className="inline-flex items-center gap-0.5 font-mono font-bold text-amber-800 dark:text-amber-300">
                                                   <FlaskConical className="h-2.5 w-2.5" />
                                                   {c.id}:
                                                 </span>{' '}
-                                                <span className="font-medium">{c.title}</span>
+                                                <span>{c.title}</span>
                                               </div>
                                             ))}
                                           </div>
                                         )}
                                         {micros.length > 0 && (
-                                          <div className="rounded bg-blue-50/90 px-1.5 py-0.5 text-[9px] text-blue-950">
-                                            <strong>↻ {micros.length} Mikro-It.:</strong>{' '}
-                                            {micros.map((m) => m.subVersionId).join(', ')}
+                                          <div className="rounded bg-blue-50/80 px-1.5 py-1 text-[9.5px] text-blue-950 dark:bg-blue-950/40 dark:text-blue-200">
+                                            <div className="font-bold">
+                                              ↻ {micros.length} Mikro-Iterationen:
+                                            </div>
+                                            {micros.slice(0, 3).map((m) => (
+                                              <div key={m.id} className="truncate">
+                                                · {m.subVersionId} ({formatVariationCode(m.variationType ?? 'AV', lang)})
+                                              </div>
+                                            ))}
                                           </div>
                                         )}
                                         {linkedLearnings.length > 0 && (
@@ -1146,7 +1429,7 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                                             {linkedLearnings.map((l) => (
                                               <span
                                                 key={l.id}
-                                                className="inline-flex items-center gap-0.5 rounded bg-indigo-100 px-1 py-0.2 font-mono text-[9px] font-bold text-indigo-900"
+                                                className="inline-flex items-center gap-0.5 rounded bg-indigo-50 px-1 py-0.2 font-mono text-[9px] font-bold text-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-200"
                                               >
                                                 <Lightbulb className="h-2.5 w-2.5" />
                                                 {l.id}
@@ -1154,16 +1437,53 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
                                             ))}
                                           </div>
                                         )}
-                                        {getMediaPreview(ev, rse.rseId) && (
-                                          <img
-                                            src={getMediaPreview(ev, rse.rseId)}
-                                            alt={rse.name}
-                                            className="mt-1 h-16 w-full rounded object-cover"
-                                          />
+                                        {previewImg && (
+                                          <div className="flex justify-center rounded border border-slate-200 bg-slate-100/70 p-0.5 dark:border-slate-700 dark:bg-slate-950">
+                                            <img
+                                              src={previewImg}
+                                              alt={rse.name}
+                                              className="max-h-20 w-full object-contain"
+                                            />
+                                          </div>
                                         )}
                                       </div>
                                     )}
                                   </div>
+
+                                  {/* Hover Gap Handle in Edit Mode: Quick Add Causal Arrow from this card */}
+                                  {isEdit && (
+                                    <button
+                                      type="button"
+                                      data-interactive-node="true"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        onOpenModal({
+                                          kind: 'upsert-arrow',
+                                          defaultFromRse: rse.rseId,
+                                          defaultFromVer: col.primaryVersion.versionKey,
+                                        });
+                                      }}
+                                      title="Kausalpfeil ab diesem Entwicklungskasten hinzufügen"
+                                      className="absolute -right-2.5 top-1/2 z-30 inline-flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-full border border-violet-400 bg-white text-violet-700 opacity-0 shadow transition-opacity hover:bg-violet-600 hover:text-white group-hover/cell:opacity-100"
+                                    >
+                                      <Plus className="h-3 w-3" />
+                                    </button>
+                                  )}
+
+                                  {/* Detached Compact Reference Strip + Expandable Reference Table */}
+                                  <ReferenceBarAndTable
+                                    eventId={activeEv.eventId}
+                                    references={activeEv.references}
+                                    rseList={dataset.rseList}
+                                    appMode={appMode}
+                                    lang={lang}
+                                    compact
+                                    defaultExpanded={false}
+                                    onAddReference={onAddEventReference}
+                                    onUpdateReference={onUpdateEventReference}
+                                    onDeleteReference={onDeleteEventReference}
+                                    onSelectRse={(targetId) => onSelectRse(targetId)}
+                                  />
                                 </div>
                               );
                             })}
@@ -1179,7 +1499,6 @@ export const Swimlane2DGraphView: React.FC<Swimlane2DGraphViewProps> = ({
         </div>
       </div>
 
-      {/* Hover Tooltip Popover */}
       <HoverTooltip data={tooltip} />
     </div>
   );

@@ -1,16 +1,23 @@
+/** Canonical SGE variation types ("Model of SGE", Albers et al.) */
+export type SgeVariationKind = 'CV' | 'AV' | 'PV' | 'REM';
+
+/** Detailed event status codes (AV replaces legacy GV everywhere) */
 export type StatusCode =
   | 'BASE'
   | 'CV'
   | 'NEW'
-  | 'EC-GV'
+  | 'EC-AV'
   | 'EC-PV'
-  | 'UD-GV'
+  | 'UD-AV'
   | 'UD-PV'
   | 'REM';
 
 export type StatusColorGroup = 'BASE' | 'CV' | 'NEW' | 'EC' | 'UD' | 'REM' | 'KOMBI';
 
-export type ColorMode = 'planning' | 'variation' | 'lifecycle';
+export type ColorMode = 'variation' | 'planning' | 'lifecycle';
+
+/** Toggle between canonical English (CV / AV / PV) and German (ÜV / AV / PV) labels */
+export type NomenclatureLang = 'en' | 'de';
 
 /** Global application mode: clean presentation vs full editing */
 export type AppMode = 'presentation' | 'edit';
@@ -18,7 +25,7 @@ export type AppMode = 'presentation' | 'edit';
 /** Progressive disclosure depth (1=Compact, 2=Standard, 3=Deep Dive) */
 export type DetailLevel = 1 | 2 | 3;
 
-export type WorkspaceView = 'board' | 'swimlane2d' | 'matrix' | 'media' | 'tables';
+export type WorkspaceView = 'swimlane2d' | 'board' | 'matrix' | 'media' | 'tables';
 
 export interface PaletteSwatch {
   bg: string;
@@ -29,76 +36,94 @@ export interface PaletteSwatch {
 
 export type CustomPalette = Record<StatusColorGroup, PaletteSwatch>;
 
+/** Structured reference item for the detached reference bar & expandable table */
+export interface RseReferenceLink {
+  id: string;
+  refRseId: string;           // e.g. "R2.6" or "EXTERN"
+  refName: string;            // RSE Bezeichnung or external reference name
+  originGeneration: string;   // e.g. "G_0", "G_1", "G_2", "Extern"
+  variationType: SgeVariationKind; // CV | AV | PV | REM
+  rationale: string;          // Anpassungs- / Übernahme-Begründung
+}
+
 /** 1. Überblick_Dashboard */
 export interface SpurDashboardRow {
-  spurId: string;               // Spur_ID (S1_Rahmen_Peripherie .. S9_Benutzeroberflaeche)
-  name: string;                 // Systemspur / Baugruppe
-  role: string;                 // Rolle im Gesamtsystem
-  totalRse: number;             // RSE gesamt
-  activeRseV22: number;         // Aktive RSE (v2.2)
-  removedOrReplaced: number;    // Entfernt / Ersetzt
-  integratedRse: number;        // Integrierte RSE (Kombi)
-  versionEventsCount: number;   // Versions-Events
-  microIterationsCount: number; // Mikro-Iterationen
-  eventsChecked: string;        // Events geprüft
-  maturitySummary: string;      // Aktueller Reifegrad (SGE-Überblick)
+  spurId: string;
+  name: string;
+  role: string;
+  totalRse: number;
+  activeRseV22: number;
+  removedOrReplaced: number;
+  integratedRse: number;
+  versionEventsCount: number;
+  microIterationsCount: number;
+  eventsChecked: string;
+  maturitySummary: string;
   rowIndex: number;
 }
 
-/** 2. Phasen_Konfiguration */
+/** 2. Phasen_Konfiguration (extended with G_n & E_{n,m} SGE hierarchy) */
 export interface PhaseVersionConfig {
   versionKey: string;           // Version_Key (v0.0 .. v2.2)
   sortOrder: number;            // Sortier_Nr (1 .. 7)
+  generationId: string;         // Generation_ID (G_0, G_1, G_2, G_3)
+  generationName: string;       // e.g. "Referenzsystem", "GSD-Abschluss", "Entenrennen", "Antrittsvorlesung / Aktuell"
+  engineeringGenId: string;     // Engineering_Gen_ID (G_0, E_{1,1}, E_{2,1}, E_{3,1} ..)
+  milestoneLabel: string;       // Meilenstein_Label (e.g. "ME G_1", "ME G_2", "ME G_3")
   phaseName: string;            // Phasen_Name (e.g., "v1.1 Entenrennen")
   milestoneBadge: string;       // Meilenstein_Badge (e.g., "M1: Entenrennen", "")
-  isMilestone: boolean;         // true for M1, M2, M3
+  isMilestone: boolean;         // true for ME G_n / M1 / M2 / M3
   systemStateSummary: string;   // Technischer Systemstand & Einordnung
   rowIndex: number;
 }
 
 /** 3. RSE_Stammdaten */
 export interface RseMaster {
-  rseId: string;                  // RSE_ID (R1.1 .. R9.4)
-  spur: string;                   // Spur
-  name: string;                   // RSE_Bezeichnung
-  origin: string;                 // Herkunft
-  firstVersion: string;           // Erste_Version
-  firstVersionNr: number;         // Erste_Ver_Nr
-  removalVersion: string;         // Entfall_Version
-  removalVersionNr: number | null;// Entfall_Ver_Nr (null if 999 or empty)
-  currentLifecycle: string;       // Aktueller_Lebenszyklus
-  predecessorOrReplacement: string; // Vorgaenger_oder_Ersatz_RSE
-  currentKombiIdRaw: string;      // Aktuelle_Kombi_ID
-  currentKombiIds: string[];      // Parsed KOMBI IDs
-  rseCountInPart: number;         // RSE_Anzahl_im_Bauteil
-  versionEventsCount: number;     // Anzahl_Versions_Events
-  microIterationsCount: number;   // Anzahl_Mikro_Iterationen
-  reviewStatus: string;           // Pruefstatus_Inhalt
-  functionSummary: string;        // Kurzbeschreibung_Funktion
+  rseId: string;
+  spur: string;
+  name: string;
+  origin: string;
+  firstVersion: string;
+  firstVersionNr: number;
+  removalVersion: string;
+  removalVersionNr: number | null;
+  currentLifecycle: string;
+  predecessorOrReplacement: string;
+  currentKombiIdRaw: string;
+  currentKombiIds: string[];
+  rseCountInPart: number;
+  versionEventsCount: number;
+  microIterationsCount: number;
+  reviewStatus: string;
+  functionSummary: string;
   rowIndex: number;
 }
 
 /** 4. RSE_Phasenwechsel */
 export interface RsePhaseEvent {
-  eventId: string;                // Event_ID (EV001 .. EV165)
-  rseId: string;                  // RSE_ID
-  spur: string;                   // Spur
-  version: string;                // Version (full phaseName)
-  versionNr: number;              // Version_Nr (1 .. 7)
-  lookupKey: string;              // Lookup_Key (RSE_ID|Version_Nr)
-  statusCode: StatusCode;         // Status_Code
-  planningCategoryFig2: string;   // Planungs_Kategorie_Fig2
-  variationType: string;          // SGE_Variationstyp
-  kombiPartIdRaw: string;         // Kombi_Bauteil_ID
-  kombiPartIds: string[];         // Parsed KOMBI IDs
-  stateDescription: string;       // Kurzbeschreibung_Zustand
-  rationale: string;              // Begruendung
-  causeIdRaw: string;             // Ursache_ID
-  causeIds: string[];             // Parsed Ursache_IDs
-  stepIdRaw: string;              // Schritt_ID
-  stepIds: string[];              // Parsed Schritt_IDs
-  reviewStatus: string;           // Pruefstatus_Inhalt
-  mediaRef: string;               // Medien_Ref
+  eventId: string;
+  rseId: string;
+  spur: string;
+  version: string;
+  versionNr: number;
+  lookupKey: string;
+  statusCode: StatusCode;         // BASE | CV | NEW | EC-AV | EC-PV | UD-AV | UD-PV | REM
+  sgeVariation: SgeVariationKind; // Canonical CV | AV | PV | REM
+  isPlanned: boolean;             // true for EC-*, false for UD-*
+  planningCategoryFig2: string;
+  variationType: string;
+  kombiPartIdRaw: string;
+  kombiPartIds: string[];
+  stateDescription: string;
+  rationale: string;
+  causeIdRaw: string;
+  causeIds: string[];
+  stepIdRaw: string;
+  stepIds: string[];
+  reviewStatus: string;
+  mediaRef: string;
+  /** Structured references used in this development step (for reference bar & expandable table) */
+  references: RseReferenceLink[];
   rowIndex: number;
 }
 
@@ -109,72 +134,72 @@ export interface RseMatrixRow {
   name: string;
   kombiIdRaw: string;
   kombiIds: string[];
-  /** Map from Version_Key (e.g. "v0.0") -> StatusCode or "" */
   statusByVersionKey: Record<string, StatusCode | ''>;
   rowIndex: number;
 }
 
 /** 6. Bauteil_Integrationen */
 export interface KombiIntegration {
-  kombiId: string;                // Kombi_ID (KOMBI-01 .. KOMBI-06)
-  partName: string;               // Bauteil_Bezeichnung
-  integratedFromPhase: string;    // Integration_ab_Phase
-  rseCountInPart: number;         // Anzahl_RSE_im_Bauteil
-  involvedRseRaw: string;         // Beteiligte_RSE_IDs
-  involvedRseIds: string[];       // Parsed RSE IDs
-  involvedLanes: string;          // Beteiligte_Spuren
-  variationType: string;          // SGE_Variationsart
-  rationale: string;              // Begruendung_Funktionsintegration
-  mediaRef: string;               // Medien_Ref
+  kombiId: string;
+  partName: string;
+  integratedFromPhase: string;
+  rseCountInPart: number;
+  involvedRseRaw: string;
+  involvedRseIds: string[];
+  involvedLanes: string;
+  variationType: string;
+  rationale: string;
+  mediaRef: string;
   rowIndex: number;
 }
 
 /** 7. Mikro_Iterationen */
 export interface MicroIteration {
-  id: string;                     // Stable unique key (Sub_Version_ID or fallback)
-  detailBox: string;              // Detail_Box (Box A1, Box PH_RH, ...)
-  rseId: string;                  // RSE_ID
-  spur: string;                   // Spur
-  version: string;                // Version
-  versionNr: number | null;       // Resolved Sortier_Nr
-  parentStepId: string;           // Gehört_zu_Schritt
-  subVersionId: string;           // Sub_Version_ID
-  change: string;                 // Konstruktive / Fertigungstechnische Änderung
-  result: string;                 // Beobachtetes Ergebnis
-  evaluation: string;             // Bewertung
-  mediaRef: string;               // Medien_Ref
-  isPlaceholder: boolean;         // true for Box PH_* or placeholder text
+  id: string;
+  detailBox: string;
+  rseId: string;
+  spur: string;
+  version: string;
+  versionNr: number | null;
+  parentStepId: string;
+  subVersionId: string;
+  variationType?: SgeVariationKind; // Optional granular CV/AV/PV/REM at micro-iteration level
+  change: string;
+  result: string;
+  evaluation: string;
+  mediaRef: string;
+  isPlaceholder: boolean;
   rowIndex: number;
 }
 
 /** 8. Entwicklungsschritte */
 export interface DevelopmentStep {
-  id: string;                     // Schritt_ID (E01..E49)
-  spur: string;                   // Spur
-  rseIds: string[];               // RSE_ID (parsed)
+  id: string;
+  spur: string;
+  rseIds: string[];
   rseIdRaw: string;
-  version: string;                // Version
-  versionNr: number | null;       // Version_Nr
-  stepType: string;               // Schritt_Typ
-  title: string;                  // Kurz_Titel
-  implementation: string;         // Konstruktive / Logische Ausführung
-  stand: string;                  // Automatischer_Stand
-  detailBox: string;              // Detail_Box
-  learnings: string[];            // Learnings
+  version: string;
+  versionNr: number | null;
+  stepType: string;
+  title: string;
+  implementation: string;
+  stand: string;
+  detailBox: string;
+  learnings: string[];
   rowIndex: number;
 }
 
 /** 9. Ursachen_Tests_Befunde */
 export interface CauseFinding {
-  id: string;                     // Ursache_ID (U01..U25)
-  category: string;               // Kategorie
-  laneRef: string;                // Spur_Bezug
-  affectedStepId: string;         // Betroffener_Schritt
-  triggeredStepId: string;        // Ausgeloester_Schritt
-  title: string;                  // Kurz_Titel
-  observation: string;            // Dokumentierte Beobachtung / Fakt
-  hypothesis: string;             // Hypothese / Grenze der Nachweiskraft
-  learnings: string[];            // Learnings
+  id: string;
+  category: string;
+  laneRef: string;
+  affectedStepId: string;
+  triggeredStepId: string;
+  title: string;
+  observation: string;
+  hypothesis: string;
+  learnings: string[];
   rowIndex: number;
 }
 
@@ -188,47 +213,46 @@ export type EdgeCategory =
   | 'milestoneTest';
 
 export interface ConnectionArrow {
-  id: string;                     // Pfeil_ID (P_01..P_50)
-  from: string;                   // Von_Schritt_ID
-  to: string;                     // Nach_Schritt_ID
-  /** Optional direct 2D-Swimlane anchors for arrows added directly between RSE nodes */
+  id: string;
+  from: string;
+  to: string;
   fromRseId?: string;
   fromVersionKey?: string;
   toRseId?: string;
   toVersionKey?: string;
-  arrowType: string;              // Pfeil_Typ
+  arrowType: string;
   category: EdgeCategory;
-  causeIdRaw: string;             // Begruendung_Ursache_ID
+  causeIdRaw: string;
   causeIds: string[];
-  laneRef: string;                // Spur_Bezug
-  rationale: string;              // Begründung des Entwicklungsschritts
-  layoutDirection: string;        // Wirkrichtung_Layout
+  laneRef: string;
+  rationale: string;
+  layoutDirection: string;
   rowIndex: number;
 }
 
 /** 11. Methodik_Learnings */
 export interface MethodikLearning {
-  id: string;                     // Learning_ID (M01..M16)
-  topic: string;                  // Themenfeld
-  title: string;                  // Kurz_Titel_Learning
-  principle: string;              // Übertragbares Prinzip
-  projectExample: string;         // Konkretes Projektbeispiel
-  linkedStepIds: string[];        // Verknuepfte_Schritte
-  linkedCauseIds: string[];       // Verknuepfte_Ursachen
-  scientificContext: string;      // Wissenschaftliche Einordnung
+  id: string;
+  topic: string;
+  title: string;
+  principle: string;
+  projectExample: string;
+  linkedStepIds: string[];
+  linkedCauseIds: string[];
+  scientificContext: string;
   rowIndex: number;
 }
 
 /** 12. Vorab_Dimensionierung */
 export interface PreDimensioningRow {
-  id: string;                     // Parameter-ID (D01..D32)
-  subDomain: string;              // Teilbereich
-  parameter: string;              // Größe / Parameter
-  value: string;                  // Wert
-  unit: string;                   // Einheit
-  formulaOrSource: string;        // Excel-Formel / Herkunft
-  evidenceType: string;           // Evidenz-Typ
-  methodicalNotes: string;        // Methodische Einordnung / Kritische Prüfung
+  id: string;
+  subDomain: string;
+  parameter: string;
+  value: string;
+  unit: string;
+  formulaOrSource: string;
+  evidenceType: string;
+  methodicalNotes: string;
   rowIndex: number;
 }
 
@@ -246,6 +270,7 @@ export type SheetNameV14 =
   | 'RSE_Stammdaten'
   | 'RSE_Phasenwechsel'
   | 'RSE_Phasenmatrix'
+  | 'RSE_Referenzen'
   | 'Bauteil_Integrationen'
   | 'Mikro_Iterationen'
   | 'Entwicklungsschritte'
@@ -314,7 +339,7 @@ export interface SgeDataset {
 
 /** Locally persisted media attachment (stored in IndexedDB) */
 export interface MediaAttachment {
-  refKey: string;         // Normalized Medien_Ref (e.g. "media/RH_01.png", "rse:R1.1", "event:EV001")
+  refKey: string;
   fileName: string;
   mimeType: string;
   dataUrl: string;

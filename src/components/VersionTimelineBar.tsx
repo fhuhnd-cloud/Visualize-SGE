@@ -16,11 +16,17 @@ import {
   AppMode,
   ColorMode,
   CustomPalette,
+  NomenclatureLang,
   PhaseVersionConfig,
   StatusColorGroup,
 } from '../types/sge';
 import { VersionKpiSnapshot } from '../utils/sgeAnalytics';
-import { DEFAULT_SGE_PALETTE, SGE_LEGEND_ITEMS } from '../utils/sgeVisualConfig';
+import {
+  DEFAULT_SGE_PALETTE,
+  SGE_LEGEND_ITEMS,
+  VARIATION_MARKER_COLORS,
+  formatVariationCode,
+} from '../utils/sgeVisualConfig';
 import { ModalState } from './EntityEditModals';
 
 interface VersionTimelineBarProps {
@@ -28,6 +34,7 @@ interface VersionTimelineBarProps {
   selectedVersionIndex: number;
   onSelectVersionIndex: (index: number) => void;
   appMode?: AppMode;
+  lang?: NomenclatureLang;
   onOpenModal?: (modal: ModalState) => void;
   kpi: VersionKpiSnapshot | null;
   activeColorFilters: StatusColorGroup[];
@@ -46,6 +53,7 @@ export const VersionTimelineBar: React.FC<VersionTimelineBarProps> = ({
   selectedVersionIndex,
   onSelectVersionIndex,
   appMode = 'presentation',
+  lang = 'en',
   onOpenModal,
   kpi,
   activeColorFilters,
@@ -134,6 +142,9 @@ export const VersionTimelineBar: React.FC<VersionTimelineBarProps> = ({
 
             {currentVersion && (
               <div className="flex items-center gap-2">
+                <span className="rounded bg-slate-900 px-1.5 py-0.5 font-mono text-[10px] font-bold text-white dark:bg-blue-600">
+                  {currentVersion.generationId} · {currentVersion.engineeringGenId}
+                </span>
                 <span className="font-mono text-xs font-bold text-slate-900 dark:text-white">
                   {currentVersion.phaseName}
                 </span>
@@ -207,7 +218,8 @@ export const VersionTimelineBar: React.FC<VersionTimelineBarProps> = ({
                   color: palette.CV.text,
                 }}
               >
-                CV: <strong className="font-mono">{Math.round(kpi.carryoverRatio * 100)}%</strong>
+                {formatVariationCode('CV', lang)}:{' '}
+                <strong className="font-mono">{Math.round(kpi.carryoverRatio * 100)}%</strong>
               </span>
               {kpi.removedTotalCount > 0 && (
                 <span
@@ -243,9 +255,9 @@ export const VersionTimelineBar: React.FC<VersionTimelineBarProps> = ({
                         : 'border-slate-200 bg-slate-100/70 text-slate-600 hover:border-slate-300 hover:bg-white dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400'
                   }`}
                 >
-                  <span className="font-mono font-bold">{ver.versionKey}</span>
-                  <span className="hidden lg:inline max-w-[115px] truncate text-[11px] opacity-85">
-                    {ver.phaseName.replace(ver.versionKey, '').trim()}
+                  <span className="font-mono font-bold">{ver.engineeringGenId}</span>
+                  <span className="hidden lg:inline max-w-[110px] truncate text-[10.5px] opacity-85">
+                    {ver.versionKey} · {ver.phaseName.replace(ver.versionKey, '').trim()}
                   </span>
                 </button>
 
@@ -338,7 +350,9 @@ export const VersionTimelineBar: React.FC<VersionTimelineBarProps> = ({
                       : 'hover:brightness-95'
                 }`}
               >
-                <span className="font-mono text-[10px] font-bold">{item.codeLabel}</span>
+                <span className="font-mono text-[10px] font-bold">
+                  {lang === 'de' && item.codeLabelDe ? item.codeLabelDe : item.codeLabel}
+                </span>
                 <span className="hidden 2xl:inline font-medium opacity-90">{item.title}</span>
                 <span className="rounded bg-white/75 px-1 py-0.2 font-mono text-[10px] font-bold tabular-nums">
                   {count}
@@ -361,7 +375,7 @@ export const VersionTimelineBar: React.FC<VersionTimelineBarProps> = ({
                   ? 'bg-amber-500 text-white'
                   : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800'
               }`}
-              title="Nur ungeplante Abweichungen (UD-GV & UD-PV)"
+              title="Nur ungeplante Abweichungen (UD-AV & UD-PV)"
             >
               Nur UD
             </button>
@@ -418,8 +432,8 @@ export const VersionTimelineBar: React.FC<VersionTimelineBarProps> = ({
           >
             {(
               [
+                { id: 'variation', label: `${formatVariationCode('CV', lang)} / AV / PV` },
                 { id: 'planning', label: 'Fig. 2 Planung' },
-                { id: 'variation', label: 'GV / PV' },
                 { id: 'lifecycle', label: 'Lebenszyklus' },
               ] as const
             ).map((m) => (
@@ -541,38 +555,49 @@ export const VersionTimelineBar: React.FC<VersionTimelineBarProps> = ({
         </div>
       </div>
 
-      {/* Mode legend note when using GV/PV or Lifecycle mode */}
+      {/* Mode legend note when using CV/AV/PV or Lifecycle mode */}
       {colorMode !== 'planning' && (
         <div className="flex flex-wrap items-center gap-3 border-t border-slate-100 bg-slate-50/70 px-4 py-1 text-[11px] text-slate-600 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-300">
           <span className="inline-flex items-center gap-1 font-semibold">
             <Layers className="h-3 w-3" />
-            {colorMode === 'variation' ? 'Variationsart-Farbmodus:' : 'Lebenszyklus-Farbmodus:'}
+            {colorMode === 'variation' ? 'Model of SGE (Variationsarten):' : 'Lebenszyklus-Farbmodus:'}
           </span>
           {colorMode === 'variation' ? (
             <>
               <span className="inline-flex items-center gap-1">
-                <span className="h-2.5 w-2.5 rounded-xs border border-[#64748B] bg-[#E2E8F0]" />
-                Ref. (Gen. n-1)
+                <span
+                  style={{ backgroundColor: VARIATION_MARKER_COLORS.BASE.dot }}
+                  className="h-2.5 w-2.5 rounded-full"
+                />
+                G₀ Referenz
               </span>
               <span className="inline-flex items-center gap-1">
-                <span className="h-2.5 w-2.5 rounded-xs border border-[#2563EB] bg-[#DBEAFE]" />
-                ÜV (Carry over)
+                <span
+                  style={{ backgroundColor: VARIATION_MARKER_COLORS.CV.dot }}
+                  className="h-2.5 w-2.5 rounded-full"
+                />
+                {formatVariationCode('CV', lang)} (Carryover)
               </span>
               <span className="inline-flex items-center gap-1">
-                <span className="h-2.5 w-2.5 rounded-xs border border-[#0284C7] bg-[#E0F2FE]" />
-                GV (Gestaltvariation)
+                <span
+                  style={{ backgroundColor: VARIATION_MARKER_COLORS.AV.dot }}
+                  className="h-2.5 w-2.5 rounded-full"
+                />
+                AV (Attribute Variation)
               </span>
               <span className="inline-flex items-center gap-1">
-                <span className="h-2.5 w-2.5 rounded-xs border border-[#DB2777] bg-[#FCE7F3]" />
-                PV (Prinzipvariation)
+                <span
+                  style={{ backgroundColor: VARIATION_MARKER_COLORS.PV.dot }}
+                  className="h-2.5 w-2.5 rounded-full"
+                />
+                PV (Principle Variation)
               </span>
               <span className="inline-flex items-center gap-1">
-                <span className="h-2.5 w-2.5 rounded-xs border border-[#7C3AED] bg-[#F3E8FF]" />
-                PV (Neu / Extern)
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <span className="h-2.5 w-2.5 rounded-xs border border-dashed border-[#DC2626] bg-[#FECACA]" />
-                PV− (Entfall)
+                <span
+                  style={{ backgroundColor: VARIATION_MARKER_COLORS.REM.dot }}
+                  className="h-2.5 w-2.5 rounded-full"
+                />
+                {formatVariationCode('REM', lang)} (Entfernt / Ersetzt)
               </span>
             </>
           ) : (

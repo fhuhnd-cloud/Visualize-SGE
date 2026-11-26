@@ -25,6 +25,7 @@ import {
   AppMode,
   DetailLevel,
   IntegrityReport,
+  NomenclatureLang,
   WorkspaceView,
 } from '../types/sge';
 
@@ -35,6 +36,8 @@ interface HeaderProps {
   onChangeAppMode: (mode: AppMode) => void;
   detailLevel: DetailLevel;
   onChangeDetailLevel: (level: DetailLevel) => void;
+  lang: NomenclatureLang;
+  onChangeLang: (lang: NomenclatureLang) => void;
   report: IntegrityReport;
   integrityOpen: boolean;
   onToggleIntegrity: () => void;
@@ -44,6 +47,8 @@ interface HeaderProps {
   onJsonBackupImport: (file: File) => void;
   onExportZip: () => void;
   onExportXlsx: () => void;
+  onExportEmptyTemplate: () => void;
+  onExportSampleProject: () => void;
   onExportJson: () => void;
   onResetLocalChanges: () => void;
   darkMode: boolean;
@@ -57,6 +62,8 @@ export const Header: React.FC<HeaderProps> = ({
   onChangeAppMode,
   detailLevel,
   onChangeDetailLevel,
+  lang,
+  onChangeLang,
   report,
   integrityOpen,
   onToggleIntegrity,
@@ -66,6 +73,8 @@ export const Header: React.FC<HeaderProps> = ({
   onJsonBackupImport,
   onExportZip,
   onExportXlsx,
+  onExportEmptyTemplate,
+  onExportSampleProject,
   onExportJson,
   onResetLocalChanges,
   darkMode,
@@ -92,14 +101,14 @@ export const Header: React.FC<HeaderProps> = ({
 
   const viewItems: { key: WorkspaceView; label: string; icon: React.ReactNode }[] = [
     {
+      key: 'swimlane2d',
+      label: '2D-Swimlane',
+      icon: <GitBranch className="h-3.5 w-3.5" />,
+    },
+    {
       key: 'board',
       label: 'SGE-Karten',
       icon: <LayoutGrid className="h-3.5 w-3.5" />,
-    },
-    {
-      key: 'swimlane2d',
-      label: '2D-Swimlanes',
-      icon: <GitBranch className="h-3.5 w-3.5" />,
     },
     {
       key: 'matrix',
@@ -113,7 +122,7 @@ export const Header: React.FC<HeaderProps> = ({
     },
     {
       key: 'tables',
-      label: '13 Tabellen',
+      label: 'Tabellen',
       icon: <Table2 className="h-3.5 w-3.5" />,
     },
   ];
@@ -134,7 +143,7 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex flex-wrap items-center gap-3 min-w-0">
           <button
             type="button"
-            onClick={() => onChangeView('board')}
+            onClick={() => onChangeView('swimlane2d')}
             className="flex items-center gap-2 text-left text-[15px] font-bold tracking-tight text-slate-900 transition-opacity hover:opacity-80 dark:text-slate-100 whitespace-nowrap shrink-0"
           >
             <svg
@@ -223,8 +232,39 @@ export const Header: React.FC<HeaderProps> = ({
           )}
         </div>
 
-        {/* Zone 2: Global Mode Toggle (Präsentation vs. Bearbeiten) + Export + Import */}
+        {/* Zone 2: Global Mode Toggle (Präsentation vs. Bearbeiten) + Nomenklatur + Export + Import */}
         <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {/* Canonical SGE Nomenclature Toggle: CV/AV/PV (EN) vs ÜV/AV/PV (DE) */}
+          <div
+            role="group"
+            aria-label="SGE-Nomenklatur"
+            title="Nomenklatur: Model of SGE Standard (CV / AV / PV) oder Deutsch (ÜV / AV / PV)"
+            className="hidden xl:inline-flex items-center rounded-lg border border-slate-200 bg-slate-100/80 p-0.5 font-mono text-[10px] dark:border-slate-700 dark:bg-slate-800"
+          >
+            <button
+              type="button"
+              onClick={() => onChangeLang('en')}
+              className={`rounded px-1.5 py-1 font-bold transition-colors ${
+                lang === 'en'
+                  ? 'bg-white text-slate-950 shadow-2xs dark:bg-slate-900 dark:text-white'
+                  : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
+              }`}
+            >
+              CV/AV/PV
+            </button>
+            <button
+              type="button"
+              onClick={() => onChangeLang('de')}
+              className={`rounded px-1.5 py-1 font-bold transition-colors ${
+                lang === 'de'
+                  ? 'bg-white text-slate-950 shadow-2xs dark:bg-slate-900 dark:text-white'
+                  : 'text-slate-500 hover:text-slate-800 dark:text-slate-400'
+              }`}
+            >
+              ÜV/AV/PV
+            </button>
+          </div>
+
           {/* Prominent Global Mode Switcher */}
           <div
             role="group"
@@ -323,10 +363,46 @@ export const Header: React.FC<HeaderProps> = ({
                   <FileSpreadsheet className="mt-0.5 h-4 w-4 text-emerald-600 shrink-0" />
                   <div>
                     <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                      Änderungen als .xlsx exportieren
+                      Laufende .xlsx exportieren
                     </div>
                     <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                      Aktualisiertes 13-Blatt-Workbook inkl. Medien_Ref
+                      Aktualisiertes SGE-Workbook (Gₙ/Eₙ,ₘ, CV/AV/PV, Referenzen)
+                    </div>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportOpen(false);
+                    onExportEmptyTemplate();
+                  }}
+                  className="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  <FileSpreadsheet className="mt-0.5 h-4 w-4 text-slate-500 shrink-0" />
+                  <div>
+                    <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                      Leeres SGE-Excel-Template (.xlsx)
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Inkl. Anleitungsblatt zu Gₙ, Eₙ,ₘ, CV/AV/PV & Referenzen
+                    </div>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportOpen(false);
+                    onExportSampleProject();
+                  }}
+                  className="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  <FileSpreadsheet className="mt-0.5 h-4 w-4 text-blue-600 shrink-0" />
+                  <div>
+                    <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                      Duckomat-Beispielprojekt (.xlsx)
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Vollständiger Beispieldatensatz im neuen SGE-Schema
                     </div>
                   </div>
                 </button>

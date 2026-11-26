@@ -7,14 +7,18 @@ import {
   ProjectEditsOverlay,
   RseMaster,
   RsePhaseEvent,
+  RseReferenceLink,
   SgeDataset,
+  SgeVariationKind,
   StatusCode,
   StatusColorGroup,
 } from '../types/sge';
 import {
   derivePlanningCategoryFromStatus,
   deriveVariationTypeFromStatus,
+  isPlannedStatusCode,
   statusCodeToColorGroup,
+  statusCodeToVariationKind,
 } from './sgeVisualConfig';
 
 export type RsePresenceInVersion = 'active' | 'removed_here' | 'removed_earlier' | 'future';
@@ -23,13 +27,9 @@ export interface RseStateAtVersion {
   rse: RseMaster;
   presence: RsePresenceInVersion;
   statusCode: StatusCode | '';
-  /** The exact event occurring in the selected version, if any */
   eventAtVersion: RsePhaseEvent | null;
-  /** The latest event up to and including the selected version (for context/kombi) */
   latestEventUpToVersion: RsePhaseEvent | null;
-  /** Active KOMBI IDs at the selected version */
   kombiIdsAtVersion: string[];
-  /** Removal version label if removed_here or removed_earlier */
   removedInVersionLabel: string | null;
 }
 
@@ -41,13 +41,67 @@ export interface VersionKpiSnapshot {
   futureCount: number;
   countsByGroup: Record<StatusColorGroup, number>;
   countsByCode: Record<StatusCode, number>;
-  plannedChanges: number;       // EC-GV + EC-PV
-  unplannedDeviations: number;  // UD-GV + UD-PV
+  /** Canonical SGE variation counts (Model of SGE): CV, AV, PV, REM */
+  countsByVariation: Record<SgeVariationKind, number>;
+  plannedChanges: number;       // EC-AV + EC-PV
+  unplannedDeviations: number;  // UD-AV + UD-PV
   unplannedRatio: number;       // UD / (EC + UD + NEW + REM)
   carryoverRatio: number;       // CV / activeCount
 }
 
-/** Merges locally persisted user edits into a clean view of the SgeDataset. */
+/** Group of Engineering Generations E_{n,m} belonging to one System Generation G_n */
+export interface GenerationGroup {
+  generationId: string;         // G_0, G_1, G_2, G_3
+  generationName: string;
+  milestoneLabel: string;
+  versions: PhaseVersionConfig[];
+}
+
+export function groupVersionsByGeneration(versions: PhaseVersionConfig[]): GenerationGroup[] {
+  const groups: GenerationGroup[] = [];
+  const byId = new Map<string, GenerationGroup>();
+
+  for (const ver of versions) {
+    let grp = byId.get(ver.generationId);
+    if (!grp) {
+      grp = {
+        generationId: ver.generationId,
+        generationName: ver.generationName,
+        milestoneLabel: ver.milestoneLabel,
+        versions: [],
+      };
+      byId.set(ver.generationId, grp);
+      groups.push(grp);
+    }
+    grp.versions.push(ver);
+    if (ver.milestoneLabel && /^ME\s*G/i.test(ver.milestoneLabel)) {
+      grp.milestoneLabel = ver.milestoneLabel;
+    }
+  }
+  return groups;
+}
+
+/** Summarizes reference counts (CV, AV, PV, REM) for the detached reference bar under a card */
+export function countReferencesByVariation(references: RseReferenceLink[]): {
+  CV: number;
+  AV: number;
+  PV: number;
+  REM: number;
+  total: number;
+} {
+  let CV = 0;
+  let AV = 0;
+  let PV = 0;
+  let REM = 0;
+  for (const r of references) {
+    if (r.variationType === 'CV') CV++;
+    else if (r.variationType === 'AV') AV++;
+    else if (r.variationType === 'REM') REM++;
+    else PV++;
+  }
+  return { CV, AV, PV, REM, total: references.length };
+}
+
 export function applyEditsToDataset(
   dataset: SgeDataset,
   edits: ProjectEditsOverlay
@@ -55,10 +109,7 @@ export function applyEditsToDataset(
   const hasEventEdits = Object.keys(edits.events).length > 0;
   const hasMicroEdits = Object.keys(edits.microIterations).length > 0;
   const hasKombiEdits = Object.keys(edits.kombis).length > 0;
-
-  if (!hasEventEdits && !hasMicroEdits && !hasKombiEdits) {
-    return dataset;
-  }
+  if (!hasEventEdits && !hasMicroEdits && !hasKombiEdits) return dataset;
 
   const events = dataset.events.map((ev) => {
     const patch = edits.events[ev.eventId];
@@ -67,8 +118,10 @@ export function applyEditsToDataset(
     return {
       ...ev,
       statusCode,
+      sgeVariation: statusCodeToVariationKind(statusCode),
+      isPlanned: isPlannedStatusCode(statusCode),
       planningCategoryFig2: derivePlanningCategoryFromStatus(statusCode),
-      variationType: deriveVariationTypeFromStatus(statusCode),
+      variationType: deriveVariationTypeFromStatus(statusCode, 'en'),
       stateDescription: patch.stateDescription ?? ev.stateDescription,
       rationale: patch.rationale ?? ev.rationale,
       mediaRef: patch.mediaRef ?? ev.mediaRef,
@@ -79,7 +132,6 @@ export function applyEditsToDataset(
     const patch = edits.microIterations[m.id];
     if (!patch) return m;
     const change = patch.change ?? m.change;
-    const result = patch.result ?? m.result;
     const evaluation = patch.evaluation ?? m.evaluation;
     const isPlaceholder =
       (m.detailBox.toUpperCase().startsWith('BOX PH_') &&
@@ -88,7 +140,7 @@ export function applyEditsToDataset(
     return {
       ...m,
       change,
-      result,
+      result: patch.result ?? m.result,
       evaluation,
       mediaRef: patch.mediaRef ?? m.mediaRef,
       isPlaceholder,
@@ -106,51 +158,9 @@ export function applyEditsToDataset(
     };
   });
 
-  // Update matrix cells if event status codes changed
-  let matrix = dataset.matrix;
-  if (hasEventEdits) {
-    const evByRse = new Map<string, RsePhaseEvent[]>();
-    for (const ev of events) {
-      const list = evByRse.get(ev.rseId) ?? [];
-      list.push(ev);
-      evByRse.set(ev.rseId, list);
-    }
-    matrix = dataset.matrix.map((row) => {
-      const rseEvents = evByRse.get(row.rseId) ?? [];
-      const anyEdited = rseEvents.some((ev) => Boolean(edits.events[ev.eventId]?.statusCode));
-      if (!anyEdited) return row;
-
-      const byVerNr = new Map<number, RsePhaseEvent>();
-      for (const ev of rseEvents) byVerNr.set(ev.versionNr, ev);
-      const nextMap: Record<string, StatusCode | ''> = {};
-      let active = false;
-      for (const v of dataset.versions) {
-        const ev = byVerNr.get(v.sortOrder);
-        if (ev) {
-          nextMap[v.versionKey] = ev.statusCode;
-          active = ev.statusCode !== 'REM';
-        } else if (active) {
-          nextMap[v.versionKey] = 'CV';
-        } else {
-          nextMap[v.versionKey] = '';
-        }
-      }
-      return { ...row, statusByVersionKey: nextMap };
-    });
-  }
-
-  return {
-    ...dataset,
-    events,
-    microIterations,
-    kombis,
-    matrix,
-  };
+  return { ...dataset, events, microIterations, kombis };
 }
 
-/**
- * Resolves the exact live state of every RSE at a selected system version (v0.0 .. v2.2).
- */
 export function computeRseStatesAtVersion(
   dataset: SgeDataset,
   version: PhaseVersionConfig
@@ -176,16 +186,11 @@ export function computeRseStatesAtVersion(
 
     let latestEventUpToVersion: RsePhaseEvent | null = null;
     for (const ev of rseEvents) {
-      if (ev.versionNr <= version.sortOrder) {
-        latestEventUpToVersion = ev;
-      }
+      if (ev.versionNr <= version.sortOrder) latestEventUpToVersion = ev;
     }
 
-    // Determine exact status from matrix (primary) or event fallback
     let statusCode: StatusCode | '' = matRow?.statusByVersionKey[version.versionKey] ?? '';
-    if (!statusCode && eventAtVersion) {
-      statusCode = eventAtVersion.statusCode;
-    }
+    if (!statusCode && eventAtVersion) statusCode = eventAtVersion.statusCode;
 
     let presence: RsePresenceInVersion = 'future';
     let removedInVersionLabel: string | null = null;
@@ -195,21 +200,14 @@ export function computeRseStatesAtVersion(
       removedInVersionLabel = version.versionKey;
     } else if (statusCode) {
       presence = 'active';
+    } else if (latestEventUpToVersion && latestEventUpToVersion.statusCode === 'REM') {
+      presence = 'removed_earlier';
+      const remVer = versionBySort.get(latestEventUpToVersion.versionNr);
+      removedInVersionLabel = remVer ? remVer.versionKey : latestEventUpToVersion.version;
     } else {
-      // No status in this version: check if it was removed earlier or not yet introduced
-      if (latestEventUpToVersion && latestEventUpToVersion.statusCode === 'REM') {
-        presence = 'removed_earlier';
-        const remVer = versionBySort.get(latestEventUpToVersion.versionNr);
-        removedInVersionLabel = remVer ? remVer.versionKey : latestEventUpToVersion.version;
-      } else {
-        presence = 'future';
-      }
+      presence = 'future';
     }
 
-    // Active KOMBI IDs at this version:
-    // Use kombiPartIds from the current/latest event up to this version; if an RSE's
-    // master Aktuelle_Kombi_ID was already introduced at or before this version (e.g. KOMBI-04
-    // introduced in v1.1 for R2.3/R2.7 while v2.0 events modified sub-features), preserve it.
     let kombiIdsAtVersion: string[] = [];
     if (presence === 'active') {
       if (eventAtVersion && eventAtVersion.kombiPartIds.length > 0) {
@@ -222,9 +220,7 @@ export function computeRseStatesAtVersion(
             ev.versionNr <= version.sortOrder &&
             ev.kombiPartIds.some((kId) => rse.currentKombiIds.includes(kId))
         );
-        if (alreadyIntegrated) {
-          kombiIdsAtVersion = rse.currentKombiIds;
-        }
+        if (alreadyIntegrated) kombiIdsAtVersion = rse.currentKombiIds;
       }
     } else if (presence === 'removed_here' && eventAtVersion) {
       kombiIdsAtVersion = eventAtVersion.kombiPartIds;
@@ -254,9 +250,9 @@ export function computeVersionKpis(
     BASE: 0,
     CV: 0,
     NEW: 0,
-    'EC-GV': 0,
+    'EC-AV': 0,
     'EC-PV': 0,
-    'UD-GV': 0,
+    'UD-AV': 0,
     'UD-PV': 0,
     REM: 0,
   };
@@ -269,6 +265,12 @@ export function computeVersionKpis(
     REM: 0,
     KOMBI: 0,
   };
+  const countsByVariation: Record<SgeVariationKind, number> = {
+    CV: 0,
+    AV: 0,
+    PV: 0,
+    REM: 0,
+  };
 
   let activeCount = 0;
   let removedHereCount = 0;
@@ -278,18 +280,18 @@ export function computeVersionKpis(
   for (const st of resolvedStates.values()) {
     if (st.presence === 'active') {
       activeCount++;
-      if (st.kombiIdsAtVersion.length > 0) {
-        countsByGroup.KOMBI++;
-      }
+      if (st.kombiIdsAtVersion.length > 0) countsByGroup.KOMBI++;
       if (st.statusCode) {
         countsByCode[st.statusCode]++;
         countsByGroup[statusCodeToColorGroup(st.statusCode)]++;
+        countsByVariation[statusCodeToVariationKind(st.statusCode)]++;
       }
     } else if (st.presence === 'removed_here') {
       removedHereCount++;
       removedTotalCount++;
       countsByCode.REM++;
       countsByGroup.REM++;
+      countsByVariation.REM++;
     } else if (st.presence === 'removed_earlier') {
       removedTotalCount++;
     } else {
@@ -297,8 +299,8 @@ export function computeVersionKpis(
     }
   }
 
-  const plannedChanges = countsByCode['EC-GV'] + countsByCode['EC-PV'];
-  const unplannedDeviations = countsByCode['UD-GV'] + countsByCode['UD-PV'];
+  const plannedChanges = countsByCode['EC-AV'] + countsByCode['EC-PV'];
+  const unplannedDeviations = countsByCode['UD-AV'] + countsByCode['UD-PV'];
   const totalChanges = plannedChanges + unplannedDeviations + countsByCode.NEW + countsByCode.REM;
 
   return {
@@ -309,6 +311,7 @@ export function computeVersionKpis(
     futureCount,
     countsByGroup,
     countsByCode,
+    countsByVariation,
     plannedChanges,
     unplannedDeviations,
     unplannedRatio: totalChanges > 0 ? unplannedDeviations / totalChanges : 0,
@@ -316,7 +319,6 @@ export function computeVersionKpis(
   };
 }
 
-/** Resolves all Methodik_Learnings linked to an event (via its Schritt_IDs & Ursache_IDs). */
 export function getLearningsForEvent(
   event: RsePhaseEvent,
   dataset: SgeDataset
@@ -326,14 +328,10 @@ export function getLearningsForEvent(
   const learningIds = new Set<string>();
 
   for (const step of dataset.steps) {
-    if (stepSet.has(step.id)) {
-      step.learnings.forEach((id) => learningIds.add(id));
-    }
+    if (stepSet.has(step.id)) step.learnings.forEach((id) => learningIds.add(id));
   }
   for (const cause of dataset.causes) {
-    if (causeSet.has(cause.id)) {
-      cause.learnings.forEach((id) => learningIds.add(id));
-    }
+    if (causeSet.has(cause.id)) cause.learnings.forEach((id) => learningIds.add(id));
   }
   for (const l of dataset.learnings) {
     if (
@@ -343,7 +341,6 @@ export function getLearningsForEvent(
       learningIds.add(l.id);
     }
   }
-
   return dataset.learnings.filter((l) => learningIds.has(l.id));
 }
 

@@ -16,8 +16,10 @@ import {
   RseMaster,
   RseMatrixRow,
   RsePhaseEvent,
+  RseReferenceLink,
   SgeDataset,
   SgeSummaryRow,
+  SgeVariationKind,
   SheetNameV14,
   SpurDashboardRow,
   StatusCode,
@@ -27,6 +29,8 @@ import {
   CANONICAL_SGE_LANES,
   derivePlanningCategoryFromStatus,
   deriveVariationTypeFromStatus,
+  isPlannedStatusCode,
+  statusCodeToVariationKind,
 } from './sgeVisualConfig';
 
 function normalizeKey(value: string): string {
@@ -70,12 +74,37 @@ export function parseIdList(raw: string): string[] {
   return result;
 }
 
+/**
+ * Parses Status_Code and automatically maps legacy GV codes from older v14 Excel files
+ * to canonical SGE AV (Attribute Variation) codes:
+ * - EC-GV -> EC-AV
+ * - UD-GV -> UD-AV
+ * - GV    -> EC-AV
+ */
 export function parseStatusCode(raw: string): StatusCode | '' {
   const upper = raw.trim().toUpperCase().replace(/\s+/g, '');
+  if (!upper) return '';
+  if (upper === 'EC-GV' || upper === 'GV' || upper === 'AV') return 'EC-AV';
+  if (upper === 'UD-GV') return 'UD-AV';
+  if (upper === 'PV') return 'EC-PV';
+  if (upper === 'ÜV' || upper === 'UEV') return 'CV';
+  if (upper === 'ENTFALL' || upper === 'PV-') return 'REM';
   if ((ALL_STATUS_CODES as string[]).includes(upper)) {
     return upper as StatusCode;
   }
   return '';
+}
+
+export function parseVariationKind(raw: string): SgeVariationKind {
+  const u = raw.trim().toUpperCase();
+  if (u.startsWith('CV') || u.startsWith('ÜV') || u.startsWith('UEV')) return 'CV';
+  if (u.startsWith('AV') || u.startsWith('GV') || u.includes('ATTRIBUT') || u.includes('GESTALT')) {
+    return 'AV';
+  }
+  if (u.startsWith('REM') || u.includes('ENTFALL') || u.includes('ENTFERN') || u.startsWith('PV-')) {
+    return 'REM';
+  }
+  return 'PV';
 }
 
 export function classifyArrowType(rawType: string): EdgeCategory {
@@ -158,6 +187,89 @@ export function sortSgeLanes(lanesFromData: string[]): string[] {
   });
 }
 
+/**
+ * Default SGE Generation Hierarchy ("Model of SGE" – Albers et al.) for legacy v14 workbooks
+ * that do not yet carry explicit Generation_ID / Engineering_Gen_ID columns:
+ * - G_0: Referenzsystem (Gen. n-1, v0.0)
+ * - G_1: GSD-Abschluss (v1.0 -> E_{1,1}, ME G_1)
+ * - G_2: Entenrennen (v1.1 -> E_{2,1}, ME G_2)
+ * - G_3: Antrittsvorlesung / Aktueller Stand (v1.2 E_{3,1}, v2.0 E_{3,2}, v2.1 E_{3,3}, v2.2 E_{3,4} -> ME G_3)
+ */
+function inferDefaultGenerationMeta(
+  versionKey: string,
+  sortOrder: number,
+  milestoneBadge: string
+): {
+  generationId: string;
+  generationName: string;
+  engineeringGenId: string;
+  milestoneLabel: string;
+} {
+  const vk = versionKey.trim().toLowerCase();
+  if (vk === 'v0.0' || sortOrder === 1) {
+    return {
+      generationId: 'G_0',
+      generationName: 'Referenzsystem (Gen. n-1)',
+      engineeringGenId: 'G_0',
+      milestoneLabel: 'Ref. G_0',
+    };
+  }
+  if (vk === 'v1.0' || sortOrder === 2) {
+    return {
+      generationId: 'G_1',
+      generationName: 'GSD-Abschluss',
+      engineeringGenId: 'E_{1,1}',
+      milestoneLabel: 'ME G_1',
+    };
+  }
+  if (vk === 'v1.1' || sortOrder === 3) {
+    return {
+      generationId: 'G_2',
+      generationName: 'Entenrennen',
+      engineeringGenId: 'E_{2,1}',
+      milestoneLabel: 'ME G_2',
+    };
+  }
+  if (vk === 'v1.2' || sortOrder === 4) {
+    return {
+      generationId: 'G_3',
+      generationName: 'Antrittsvorlesung / Aktueller Stand',
+      engineeringGenId: 'E_{3,1}',
+      milestoneLabel: milestoneBadge ? 'M2' : '',
+    };
+  }
+  if (vk === 'v2.0' || sortOrder === 5) {
+    return {
+      generationId: 'G_3',
+      generationName: 'Antrittsvorlesung / Aktueller Stand',
+      engineeringGenId: 'E_{3,2}',
+      milestoneLabel: '',
+    };
+  }
+  if (vk === 'v2.1' || sortOrder === 6) {
+    return {
+      generationId: 'G_3',
+      generationName: 'Antrittsvorlesung / Aktueller Stand',
+      engineeringGenId: 'E_{3,3}',
+      milestoneLabel: milestoneBadge ? 'M3' : '',
+    };
+  }
+  if (vk === 'v2.2' || sortOrder === 7) {
+    return {
+      generationId: 'G_3',
+      generationName: 'Antrittsvorlesung / Aktueller Stand',
+      engineeringGenId: 'E_{3,4}',
+      milestoneLabel: 'ME G_3',
+    };
+  }
+  return {
+    generationId: `G_${Math.max(1, sortOrder - 3)}`,
+    generationName: `Generation ${Math.max(1, sortOrder - 3)}`,
+    engineeringGenId: `E_{${Math.max(1, sortOrder - 3)},1}`,
+    milestoneLabel: milestoneBadge || '',
+  };
+}
+
 function findSheet(
   workbook: XLSX.WorkBook,
   candidates: string[]
@@ -178,11 +290,10 @@ function findSheet(
 }
 
 interface ParsedRow {
-  rowIndex: number; // 1-based Excel row
+  rowIndex: number;
   values: Record<string, string>;
 }
 
-/** Reads a worksheet with headers strictly in Row 1 (index 0). */
 function readSheetRow1Headers(sheet: XLSX.WorkSheet): {
   headers: string[];
   rows: ParsedRow[];
@@ -261,6 +372,7 @@ function resolveVersionNrFromText(
     if (
       v.versionKey === trimmed ||
       v.phaseName === trimmed ||
+      v.engineeringGenId === trimmed ||
       normalizeKey(v.phaseName) === norm ||
       normalizeKey(v.versionKey) === norm
     ) {
@@ -276,32 +388,20 @@ function resolveVersionNrFromText(
   return null;
 }
 
-/**
- * Reconstructs a single RSE's status across versions from RSE_Phasenwechsel
- * when RSE_Phasenmatrix formulas aren't cached or are missing.
- */
 function deriveMatrixRowFromEvents(
-  rse: RseMaster,
   versions: PhaseVersionConfig[],
   eventsForRse: RsePhaseEvent[]
 ): Record<string, StatusCode | ''> {
   const byVersionNr = new Map<number, RsePhaseEvent>();
-  for (const ev of eventsForRse) {
-    byVersionNr.set(ev.versionNr, ev);
-  }
+  for (const ev of eventsForRse) byVersionNr.set(ev.versionNr, ev);
   const result: Record<string, StatusCode | ''> = {};
-  let isCurrentlyActive = false;
-
+  let active = false;
   for (const v of versions) {
     const ev = byVersionNr.get(v.sortOrder);
     if (ev) {
       result[v.versionKey] = ev.statusCode;
-      if (ev.statusCode === 'REM') {
-        isCurrentlyActive = false;
-      } else {
-        isCurrentlyActive = true;
-      }
-    } else if (isCurrentlyActive) {
+      active = ev.statusCode !== 'REM';
+    } else if (active) {
       result[v.versionKey] = 'CV';
     } else {
       result[v.versionKey] = '';
@@ -311,16 +411,141 @@ function deriveMatrixRowFromEvents(
 }
 
 /**
- * Validates foreign-key integrity across all 13 sheets:
- * RSE_ID, Ursache_ID, Schritt_ID, Kombi_ID, plus duplicate primary keys.
+ * Automatically derives structured RseReferenceLink[] for each development event
+ * when no explicit RSE_Referenzen sheet is present in the imported workbook.
  */
+function populateEventReferences(
+  events: RsePhaseEvent[],
+  rseList: RseMaster[],
+  versions: PhaseVersionConfig[],
+  kombis: KombiIntegration[],
+  steps: DevelopmentStep[],
+  arrows: ConnectionArrow[],
+  explicitRefsByEventId: Map<string, RseReferenceLink[]>
+): RsePhaseEvent[] {
+  const rseById = new Map(rseList.map((r) => [r.rseId, r]));
+  const verBySort = new Map(versions.map((v) => [v.sortOrder, v]));
+  const stepById = new Map(steps.map((s) => [s.id, s]));
+  const kombiById = new Map(kombis.map((k) => [k.kombiId, k]));
+
+  const eventsByRse = new Map<string, RsePhaseEvent[]>();
+  for (const ev of events) {
+    const list = eventsByRse.get(ev.rseId) ?? [];
+    list.push(ev);
+    eventsByRse.set(ev.rseId, list);
+  }
+  for (const list of eventsByRse.values()) {
+    list.sort((a, b) => a.versionNr - b.versionNr);
+  }
+
+  return events.map((ev) => {
+    const explicit = explicitRefsByEventId.get(ev.eventId);
+    if (explicit && explicit.length > 0) {
+      return { ...ev, references: explicit };
+    }
+
+    const refs: RseReferenceLink[] = [];
+    const seenKeys = new Set<string>();
+    const pushRef = (item: Omit<RseReferenceLink, 'id'>) => {
+      const dedupe = `${item.refRseId}::${item.variationType}`;
+      if (seenKeys.has(dedupe)) return;
+      seenKeys.add(dedupe);
+      refs.push({ id: `${ev.eventId}_ref_${refs.length + 1}`, ...item });
+    };
+
+    const master = rseById.get(ev.rseId);
+    const rseHistory = eventsByRse.get(ev.rseId) ?? [];
+    const prevEv = [...rseHistory].reverse().find((p) => p.versionNr < ev.versionNr);
+
+    // 1. Predecessor state of the same RSE in an earlier generation
+    if (ev.statusCode === 'BASE') {
+      pushRef({
+        refRseId: ev.rseId,
+        refName: master?.name || ev.rseId,
+        originGeneration: 'G_0 (Vorgängersystem)',
+        variationType: 'CV',
+        rationale: 'Übernommen als Referenzbasis aus Vorgängergeneration (Gen. n-1).',
+      });
+    } else if (ev.statusCode === 'NEW') {
+      pushRef({
+        refRseId: ev.rseId,
+        refName: master?.name || ev.rseId,
+        originGeneration: 'Extern / Neu',
+        variationType: 'PV',
+        rationale: ev.rationale || 'Neu hinzugefügtes Referenzsystemelement (Prinzipvariation).',
+      });
+    } else if (prevEv) {
+      const prevVer = verBySort.get(prevEv.versionNr);
+      pushRef({
+        refRseId: ev.rseId,
+        refName: master?.name || ev.rseId,
+        originGeneration: prevVer
+          ? `${prevVer.generationId} (${prevVer.engineeringGenId})`
+          : `v${prevEv.versionNr}`,
+        variationType: ev.sgeVariation,
+        rationale:
+          ev.rationale ||
+          (ev.statusCode === 'REM'
+            ? 'Element entfernt bzw. abgelöst.'
+            : 'Weiterentwicklung auf Basis des Vorgängerstands.'),
+      });
+    }
+
+    // 2. Incoming causal arrows targeting this event's Entwicklungsschritte
+    if (ev.stepIds.length > 0) {
+      const stepSet = new Set(ev.stepIds);
+      for (const a of arrows) {
+        if (!stepSet.has(a.to)) continue;
+        const fromStep = stepById.get(a.from);
+        const srcRseId = a.fromRseId || fromStep?.rseIds[0] || '';
+        if (!srcRseId || srcRseId === ev.rseId) continue;
+        const srcRse = rseById.get(srcRseId);
+        const srcVer = fromStep?.versionNr ? verBySort.get(fromStep.versionNr) : undefined;
+        const vType: SgeVariationKind =
+          a.category === 'transfer'
+            ? 'CV'
+            : a.category === 'paradigmShift'
+              ? 'PV'
+              : 'AV';
+        pushRef({
+          refRseId: srcRseId,
+          refName: srcRse?.name || fromStep?.title || srcRseId,
+          originGeneration: srcVer
+            ? `${srcVer.generationId} (${srcVer.engineeringGenId})`
+            : 'Referenz',
+          variationType: vType,
+          rationale: a.rationale || `${a.id}: ${a.arrowType}`,
+        });
+      }
+    }
+
+    // 3. Cross-lane KOMBI-xx siblings merged at this event
+    for (const kId of ev.kombiPartIds) {
+      const kombi = kombiById.get(kId);
+      if (!kombi) continue;
+      for (const siblingId of kombi.involvedRseIds) {
+        if (siblingId === ev.rseId) continue;
+        const sib = rseById.get(siblingId);
+        pushRef({
+          refRseId: siblingId,
+          refName: sib?.name || siblingId,
+          originGeneration: `${kId} (Integration)`,
+          variationType: 'PV',
+          rationale: `Funktionsintegration gemeinsam in ${kId} (${kombi.partName.slice(0, 60)}).`,
+        });
+      }
+    }
+
+    return { ...ev, references: refs };
+  });
+}
+
 export function validateSgeDataset(
   dataset: SgeDataset,
   preExistingIssues: IntegrityIssue[] = []
 ): IntegrityReport {
   const issues: IntegrityIssue[] = [...preExistingIssues];
 
-  // Primary key sets
   const versionKeyCounts = new Map<string, number>();
   for (const v of dataset.versions) {
     if (!v.versionKey) continue;
@@ -368,52 +593,10 @@ export function validateSgeDataset(
     }
   }
 
-  const kombiIdSet = new Set<string>();
-  for (const k of dataset.kombis) {
-    if (k.kombiId) kombiIdSet.add(k.kombiId);
-  }
+  const kombiIdSet = new Set<string>(dataset.kombis.map((k) => k.kombiId).filter(Boolean));
+  const stepIdSet = new Set<string>(dataset.steps.map((s) => s.id).filter(Boolean));
+  const causeIdSet = new Set<string>(dataset.causes.map((c) => c.id).filter(Boolean));
 
-  const stepIdSet = new Set<string>();
-  const stepCounts = new Map<string, number>();
-  for (const s of dataset.steps) {
-    if (!s.id) continue;
-    stepIdSet.add(s.id);
-    stepCounts.set(s.id, (stepCounts.get(s.id) ?? 0) + 1);
-  }
-  for (const [id, count] of stepCounts.entries()) {
-    if (count > 1) {
-      issues.push({
-        id: `dup-step-${id}`,
-        severity: 'error',
-        sheet: 'Entwicklungsschritte',
-        referenceId: id,
-        foreignKeyType: 'Schritt_ID',
-        message: `Doppelte Schritt_ID "${id}" (${count}× vorhanden).`,
-      });
-    }
-  }
-
-  const causeIdSet = new Set<string>();
-  const causeCounts = new Map<string, number>();
-  for (const c of dataset.causes) {
-    if (!c.id) continue;
-    causeIdSet.add(c.id);
-    causeCounts.set(c.id, (causeCounts.get(c.id) ?? 0) + 1);
-  }
-  for (const [id, count] of causeCounts.entries()) {
-    if (count > 1) {
-      issues.push({
-        id: `dup-cause-${id}`,
-        severity: 'error',
-        sheet: 'Ursachen_Tests_Befunde',
-        referenceId: id,
-        foreignKeyType: 'Ursache_ID',
-        message: `Doppelte Ursache_ID "${id}" (${count}× vorhanden).`,
-      });
-    }
-  }
-
-  // FK Checks: RSE_Stammdaten -> Kombi_ID
   for (const r of dataset.rseList) {
     for (const kId of r.currentKombiIds) {
       if (!kombiIdSet.has(kId)) {
@@ -429,12 +612,9 @@ export function validateSgeDataset(
     }
   }
 
-  // FK Checks: RSE_Phasenwechsel -> RSE_ID, Ursache_ID, Schritt_ID, Kombi_ID
   const eventIdCounts = new Map<string, number>();
   for (const ev of dataset.events) {
-    if (ev.eventId) {
-      eventIdCounts.set(ev.eventId, (eventIdCounts.get(ev.eventId) ?? 0) + 1);
-    }
+    if (ev.eventId) eventIdCounts.set(ev.eventId, (eventIdCounts.get(ev.eventId) ?? 0) + 1);
     if (!ev.rseId || !rseIdSet.has(ev.rseId)) {
       issues.push({
         id: `ev-bad-rse-${ev.eventId || ev.rowIndex}`,
@@ -495,7 +675,6 @@ export function validateSgeDataset(
     }
   }
 
-  // FK Checks: Bauteil_Integrationen -> RSE_ID
   for (const k of dataset.kombis) {
     for (const rId of k.involvedRseIds) {
       if (!rseIdSet.has(rId)) {
@@ -511,7 +690,6 @@ export function validateSgeDataset(
     }
   }
 
-  // FK Checks: Mikro_Iterationen -> RSE_ID, Schritt_ID
   for (const m of dataset.microIterations) {
     if (m.rseId && !rseIdSet.has(m.rseId)) {
       issues.push({
@@ -535,47 +713,6 @@ export function validateSgeDataset(
     }
   }
 
-  // FK Checks: Entwicklungsschritte -> RSE_ID
-  for (const s of dataset.steps) {
-    for (const rId of s.rseIds) {
-      if (!rseIdSet.has(rId)) {
-        issues.push({
-          id: `step-bad-rse-${s.id}-${rId}`,
-          severity: 'error',
-          sheet: 'Entwicklungsschritte',
-          referenceId: s.id,
-          foreignKeyType: 'RSE_ID',
-          message: `Schritt "${s.id}" verweist auf unbekannte RSE_ID "${rId}".`,
-        });
-      }
-    }
-  }
-
-  // FK Checks: Ursachen_Tests_Befunde -> Schritt_ID
-  for (const c of dataset.causes) {
-    if (c.affectedStepId && !stepIdSet.has(c.affectedStepId)) {
-      issues.push({
-        id: `cause-bad-affected-${c.id}`,
-        severity: 'error',
-        sheet: 'Ursachen_Tests_Befunde',
-        referenceId: c.id,
-        foreignKeyType: 'Schritt_ID',
-        message: `Ursache "${c.id}": Betroffener_Schritt "${c.affectedStepId}" existiert nicht.`,
-      });
-    }
-    if (c.triggeredStepId && !stepIdSet.has(c.triggeredStepId)) {
-      issues.push({
-        id: `cause-bad-triggered-${c.id}`,
-        severity: 'error',
-        sheet: 'Ursachen_Tests_Befunde',
-        referenceId: c.id,
-        foreignKeyType: 'Schritt_ID',
-        message: `Ursache "${c.id}": Ausgeloester_Schritt "${c.triggeredStepId}" existiert nicht.`,
-      });
-    }
-  }
-
-  // FK Checks: Verbindungen_Pfeile -> Schritt_ID, Ursache_ID
   for (const a of dataset.arrows) {
     if (!a.from || !stepIdSet.has(a.from)) {
       issues.push({
@@ -606,34 +743,6 @@ export function validateSgeDataset(
           referenceId: a.id,
           foreignKeyType: 'Ursache_ID',
           message: `Pfeil "${a.id}" verweist auf verwaiste Ursache_ID "${cId}".`,
-        });
-      }
-    }
-  }
-
-  // FK Checks: Methodik_Learnings -> Schritt_ID, Ursache_ID
-  for (const l of dataset.learnings) {
-    for (const sId of l.linkedStepIds) {
-      if (!stepIdSet.has(sId)) {
-        issues.push({
-          id: `learn-bad-step-${l.id}-${sId}`,
-          severity: 'warning',
-          sheet: 'Methodik_Learnings',
-          referenceId: l.id,
-          foreignKeyType: 'Schritt_ID',
-          message: `Learning "${l.id}" verweist auf unbekannte Schritt_ID "${sId}".`,
-        });
-      }
-    }
-    for (const cId of l.linkedCauseIds) {
-      if (!causeIdSet.has(cId)) {
-        issues.push({
-          id: `learn-bad-cause-${l.id}-${cId}`,
-          severity: 'warning',
-          sheet: 'Methodik_Learnings',
-          referenceId: l.id,
-          foreignKeyType: 'Ursache_ID',
-          message: `Learning "${l.id}" verweist auf unbekannte Ursache_ID "${cId}".`,
         });
       }
     }
@@ -678,12 +787,13 @@ export function parseExcelBuffer(
   const workbook = XLSX.read(buffer, { type: 'array' });
   const preIssues: IntegrityIssue[] = [];
 
-  const requiredSheets: { key: SheetNameV14; aliases: string[] }[] = [
+  const requiredSheets: { key: SheetNameV14; aliases: string[]; optional?: boolean }[] = [
     { key: 'Überblick_Dashboard', aliases: ['Überblick_Dashboard', 'Ueberblick_Dashboard', 'Dashboard'] },
     { key: 'Phasen_Konfiguration', aliases: ['Phasen_Konfiguration', 'PhasenKonfiguration'] },
     { key: 'RSE_Stammdaten', aliases: ['RSE_Stammdaten', 'RSEStammdaten'] },
     { key: 'RSE_Phasenwechsel', aliases: ['RSE_Phasenwechsel', 'RSEPhasenwechsel'] },
     { key: 'RSE_Phasenmatrix', aliases: ['RSE_Phasenmatrix', 'RSEPhasenmatrix'] },
+    { key: 'RSE_Referenzen', aliases: ['RSE_Referenzen', 'Referenzen'], optional: true },
     { key: 'Bauteil_Integrationen', aliases: ['Bauteil_Integrationen', 'BauteilIntegrationen'] },
     { key: 'Mikro_Iterationen', aliases: ['Mikro_Iterationen', 'MikroIterationen'] },
     { key: 'Entwicklungsschritte', aliases: ['Entwicklungsschritte'] },
@@ -699,7 +809,7 @@ export function parseExcelBuffer(
     const found = findSheet(workbook, req.aliases);
     if (found.sheet) {
       sheetMap.set(req.key, found.sheet);
-    } else {
+    } else if (!req.optional) {
       preIssues.push({
         id: `missing-sheet-${req.key}`,
         severity: req.key === 'RSE_Stammdaten' || req.key === 'RSE_Phasenwechsel' ? 'error' : 'warning',
@@ -710,7 +820,7 @@ export function parseExcelBuffer(
     }
   }
 
-  // 1. Phasen_Konfiguration (filter out empty reserve rows like v2.3..v2.7)
+  // 1. Phasen_Konfiguration (supports explicit Generation_ID, Engineering_Gen_ID, Meilenstein_Label)
   const versions: PhaseVersionConfig[] = [];
   const phasesSheet = sheetMap.get('Phasen_Konfiguration');
   if (phasesSheet) {
@@ -719,22 +829,39 @@ export function parseExcelBuffer(
       const acc = makeAccessor(row);
       const versionKey = acc.get(['Version_Key', 'Phase_Key']);
       const phaseName = acc.get(['Phasen_Name']);
-      if (!versionKey || !phaseName) continue; // skip reserve rows without Phasen_Name
+      if (!versionKey || !phaseName) continue;
       const sortOrder = parseNumber(acc.get(['Sortier_Nr']), versions.length + 1);
-      const milestoneBadge = acc.get(['Meilenstein_Badge']);
-      const isMilestone = /^M\d+/i.test(milestoneBadge.trim());
-      const systemStateSummary = acc.get([
-        'Technischer Systemstand & Einordnung',
-        'Technischer Systemstand',
-        'Einordnung',
-      ]);
+      const milestoneBadgeRaw = acc.get(['Meilenstein_Badge']);
+      const milestoneBadge = milestoneBadgeRaw === '-' ? '' : milestoneBadgeRaw;
+      const inferred = inferDefaultGenerationMeta(versionKey, sortOrder, milestoneBadge);
+
+      const generationId = acc.get(['Generation_ID']) || inferred.generationId;
+      const generationName = acc.get(['Generation_Name']) || inferred.generationName;
+      const engineeringGenId = acc.get(['Engineering_Gen_ID']) || inferred.engineeringGenId;
+      const milestoneLabelRaw = acc.get(['Meilenstein_Label']);
+      const milestoneLabel =
+        milestoneLabelRaw === '-' ? '' : milestoneLabelRaw || inferred.milestoneLabel;
+
+      const isMilestone =
+        /^ME\s*G/i.test(milestoneLabel) ||
+        /^M\d+/i.test(milestoneBadge.trim()) ||
+        /^M\d+/i.test(milestoneLabel.trim());
+
       versions.push({
         versionKey,
         sortOrder,
+        generationId,
+        generationName,
+        engineeringGenId,
+        milestoneLabel,
         phaseName,
-        milestoneBadge: milestoneBadge === '-' ? '' : milestoneBadge,
+        milestoneBadge,
         isMilestone,
-        systemStateSummary,
+        systemStateSummary: acc.get([
+          'Technischer Systemstand & Einordnung',
+          'Technischer Systemstand',
+          'Einordnung',
+        ]),
         rowIndex: row.rowIndex,
       });
     }
@@ -765,11 +892,8 @@ export function parseExcelBuffer(
         maturitySummary: acc.get(['Aktueller Reifegrad (SGE-Überblick)', 'Reifegrad']),
         rowIndex: row.rowIndex,
       };
-      if (item.spurId === 'SUMME') {
-        dashboardTotal = item;
-      } else {
-        dashboard.push(item);
-      }
+      if (item.spurId === 'SUMME') dashboardTotal = item;
+      else dashboard.push(item);
     }
   }
 
@@ -818,11 +942,10 @@ export function parseExcelBuffer(
       });
     }
   }
-
   const rseById = new Map(rseList.map((r) => [r.rseId, r]));
 
-  // 4. RSE_Phasenwechsel
-  const events: RsePhaseEvent[] = [];
+  // 4. RSE_Phasenwechsel (auto-maps EC-GV -> EC-AV, UD-GV -> UD-AV)
+  let events: RsePhaseEvent[] = [];
   const evSheet = sheetMap.get('RSE_Phasenwechsel');
   if (evSheet) {
     const { rows } = readSheetRow1Headers(evSheet);
@@ -863,10 +986,10 @@ export function parseExcelBuffer(
         versionNr,
         lookupKey: acc.get(['Lookup_Key']) || `${rseId}|${versionNr}`,
         statusCode,
-        planningCategoryFig2:
-          acc.get(['Planungs_Kategorie_Fig2']) || derivePlanningCategoryFromStatus(statusCode),
-        variationType:
-          acc.get(['SGE_Variationstyp']) || deriveVariationTypeFromStatus(statusCode),
+        sgeVariation: statusCodeToVariationKind(statusCode),
+        isPlanned: isPlannedStatusCode(statusCode),
+        planningCategoryFig2: derivePlanningCategoryFromStatus(statusCode),
+        variationType: deriveVariationTypeFromStatus(statusCode, 'en'),
         kombiPartIdRaw,
         kombiPartIds: parseIdList(kombiPartIdRaw),
         stateDescription: acc.get(['Kurzbeschreibung_Zustand']),
@@ -877,12 +1000,35 @@ export function parseExcelBuffer(
         stepIds: parseIdList(stepIdRaw),
         reviewStatus: acc.get(['Pruefstatus_Inhalt']),
         mediaRef: acc.get(['Medien_Ref']),
+        references: [],
         rowIndex: row.rowIndex,
       });
     }
   }
 
-  // Group events by RSE for fallback matrix computation & counts
+  // Optional Sheet: RSE_Referenzen
+  const explicitRefsByEventId = new Map<string, RseReferenceLink[]>();
+  const refSheet = sheetMap.get('RSE_Referenzen');
+  if (refSheet) {
+    const { rows } = readSheetRow1Headers(refSheet);
+    for (const row of rows) {
+      const acc = makeAccessor(row);
+      const eventId = acc.get(['Event_ID']);
+      const refRseId = acc.get(['Ref_RSE_ID', 'RSE_ID']);
+      if (!eventId || !refRseId) continue;
+      const list = explicitRefsByEventId.get(eventId) ?? [];
+      list.push({
+        id: acc.get(['Ref_ID']) || `${eventId}_ref_${list.length + 1}`,
+        refRseId,
+        refName: acc.get(['Ref_Bezeichnung', 'RSE_Bezeichnung']) || rseById.get(refRseId)?.name || refRseId,
+        originGeneration: acc.get(['Herkunft_Generation', 'Herkunft']) || 'G_0',
+        variationType: parseVariationKind(acc.get(['Variationsart', 'SGE_Variationsart']) || 'CV'),
+        rationale: acc.get(['Begruendung', 'Anpassungs_Begruendung']),
+      });
+      explicitRefsByEventId.set(eventId, list);
+    }
+  }
+
   const eventsByRse = new Map<string, RsePhaseEvent[]>();
   for (const ev of events) {
     const list = eventsByRse.get(ev.rseId) ?? [];
@@ -893,12 +1039,11 @@ export function parseExcelBuffer(
     list.sort((a, b) => a.versionNr - b.versionNr || a.rowIndex - b.rowIndex);
   }
 
-  // 5. RSE_Phasenmatrix (reads cached values, with robust derivation fallback if formulas uncached)
+  // 5. RSE_Phasenmatrix (maps EC-GV -> EC-AV, UD-GV -> UD-AV)
   const matrix: RseMatrixRow[] = [];
   const matSheet = sheetMap.get('RSE_Phasenmatrix');
   if (matSheet) {
     const { headers, rows } = readSheetRow1Headers(matSheet);
-    // Match version columns to PhaseVersionConfig
     const colByVersionKey = new Map<string, string>();
     for (const v of versions) {
       const matchedHeader = headers.find((h) => {
@@ -909,9 +1054,7 @@ export function parseExcelBuffer(
           nh.startsWith(normalizeKey(v.versionKey))
         );
       });
-      if (matchedHeader) {
-        colByVersionKey.set(v.versionKey, matchedHeader);
-      }
+      if (matchedHeader) colByVersionKey.set(v.versionKey, matchedHeader);
     }
 
     for (const row of rows) {
@@ -930,11 +1073,10 @@ export function parseExcelBuffer(
         if (parsed) anyStatusFound = true;
       }
 
-      // If Excel formulas were not cached (e.g., edited programmatically), derive directly from events
       const finalStatuses =
         anyStatusFound || !master
           ? statusByVersionKey
-          : deriveMatrixRowFromEvents(master, versions, eventsByRse.get(rseId) ?? []);
+          : deriveMatrixRowFromEvents(versions, eventsByRse.get(rseId) ?? []);
 
       const kombiIdRaw = acc.get(['Kombi_ID']) || master?.currentKombiIdRaw || '';
       matrix.push({
@@ -948,8 +1090,6 @@ export function parseExcelBuffer(
       });
     }
   }
-
-  // Fallback: if RSE_Phasenmatrix sheet was missing/empty, build it from RSE_Stammdaten + RSE_Phasenwechsel
   if (matrix.length === 0 && rseList.length > 0) {
     for (const rse of rseList) {
       matrix.push({
@@ -958,17 +1098,13 @@ export function parseExcelBuffer(
         name: rse.name,
         kombiIdRaw: rse.currentKombiIdRaw,
         kombiIds: rse.currentKombiIds,
-        statusByVersionKey: deriveMatrixRowFromEvents(
-          rse,
-          versions,
-          eventsByRse.get(rse.rseId) ?? []
-        ),
+        statusByVersionKey: deriveMatrixRowFromEvents(versions, eventsByRse.get(rse.rseId) ?? []),
         rowIndex: rse.rowIndex,
       });
     }
   }
 
-  // 6. Bauteil_Integrationen (skip empty reserve rows like KOMBI-07..10)
+  // 6. Bauteil_Integrationen
   const kombis: KombiIntegration[] = [];
   const kombiSheet = sheetMap.get('Bauteil_Integrationen');
   if (kombiSheet) {
@@ -977,9 +1113,10 @@ export function parseExcelBuffer(
       const acc = makeAccessor(row);
       const kombiId = acc.get(['Kombi_ID']);
       const partName = acc.get(['Bauteil_Bezeichnung']);
-      if (!kombiId || !partName) continue; // skip reserve rows
+      if (!kombiId || !partName) continue;
       const involvedRseRaw = acc.get(['Beteiligte_RSE_IDs']);
       const involvedRseIds = parseIdList(involvedRseRaw);
+      const rawVar = acc.get(['SGE_Variationsart']).replace(/\bGV\b/g, 'AV');
       kombis.push({
         kombiId,
         partName,
@@ -988,7 +1125,7 @@ export function parseExcelBuffer(
         involvedRseRaw,
         involvedRseIds,
         involvedLanes: acc.get(['Beteiligte_Spuren']),
-        variationType: acc.get(['SGE_Variationsart']),
+        variationType: rawVar,
         rationale: acc.get(['Begruendung_Funktionsintegration']),
         mediaRef: acc.get(['Medien_Ref']),
         rowIndex: row.rowIndex,
@@ -1014,6 +1151,7 @@ export function parseExcelBuffer(
 
       const version = acc.get(['Version']);
       const evaluation = acc.get(['Bewertung']);
+      const rawVar = acc.get(['Variationsart', 'SGE_Variationsart']);
       const isPlaceholder =
         detailBox.toUpperCase().startsWith('BOX PH_') ||
         evaluation.toLowerCase().includes('platzhalter') ||
@@ -1028,6 +1166,7 @@ export function parseExcelBuffer(
         versionNr: resolveVersionNrFromText(version, versions),
         parentStepId: acc.get(['Gehört_zu_Schritt', 'Gehoert_zu_Schritt']),
         subVersionId,
+        variationType: rawVar ? parseVariationKind(rawVar) : 'AV',
         change,
         result: acc.get(['Beobachtetes Ergebnis']),
         evaluation,
@@ -1038,20 +1177,13 @@ export function parseExcelBuffer(
     }
   }
 
-  // Reconcile RSE event & micro counts if formulas weren't cached
   const microCountByRse = new Map<string, number>();
   for (const m of microIterations) {
-    if (m.rseId) {
-      microCountByRse.set(m.rseId, (microCountByRse.get(m.rseId) ?? 0) + 1);
-    }
+    if (m.rseId) microCountByRse.set(m.rseId, (microCountByRse.get(m.rseId) ?? 0) + 1);
   }
   for (const r of rseList) {
-    if (r.versionEventsCount === 0) {
-      r.versionEventsCount = eventsByRse.get(r.rseId)?.length ?? 0;
-    }
-    if (r.microIterationsCount === 0) {
-      r.microIterationsCount = microCountByRse.get(r.rseId) ?? 0;
-    }
+    if (r.versionEventsCount === 0) r.versionEventsCount = eventsByRse.get(r.rseId)?.length ?? 0;
+    if (r.microIterationsCount === 0) r.microIterationsCount = microCountByRse.get(r.rseId) ?? 0;
   }
 
   // 8. Entwicklungsschritte
@@ -1194,7 +1326,7 @@ export function parseExcelBuffer(
     }
   }
 
-  // 13. SGE_Auswertung
+  // 13. SGE_Auswertung (normalize legacy GV text labels -> AV)
   const sgeSummary: SgeSummaryRow[] = [];
   const summarySheet = sheetMap.get('SGE_Auswertung');
   if (summarySheet) {
@@ -1209,8 +1341,13 @@ export function parseExcelBuffer(
     }
     for (const row of rows) {
       const acc = makeAccessor(row);
-      const metricLabel = acc.get(['SGE_Kennzahl / Status_Code', 'SGE_Kennzahl']);
-      if (!metricLabel) continue;
+      const rawMetric = acc.get(['SGE_Kennzahl / Status_Code', 'SGE_Kennzahl']);
+      if (!rawMetric) continue;
+      const metricLabel = rawMetric
+        .replace(/EC-GV/g, 'EC-AV')
+        .replace(/UD-GV/g, 'UD-AV')
+        .replace(/Gestaltvariation/g, 'Attribute Variation (AV)')
+        .replace(/Gestaltabweichung/g, 'Attributabweichung (UD-AV)');
       const valuesByVersionKey: Record<string, string> = {};
       for (const v of versions) {
         const col = colByVerKey.get(v.versionKey);
@@ -1224,6 +1361,17 @@ export function parseExcelBuffer(
       });
     }
   }
+
+  // Populate structured references for every development event
+  events = populateEventReferences(
+    events,
+    rseList,
+    versions,
+    kombis,
+    steps,
+    arrows,
+    explicitRefsByEventId
+  );
 
   const lanes = sortSgeLanes([
     ...dashboard.map((d) => d.spurId),
@@ -1263,19 +1411,18 @@ export async function parseExcelFile(
 }
 
 /**
- * Generates an updated 13-sheet XLSX workbook ArrayBuffer incorporating all
- * local text/status edits and updated Medien_Ref mappings.
+ * Generates an updated 14-sheet SGE XLSX workbook incorporating all edits,
+ * canonical CV/AV/PV nomenclature, G_n / E_{n,m} hierarchy, and RSE_Referenzen.
  */
 export function buildUpdatedWorkbookBytes(
   dataset: SgeDataset,
-  edits: ProjectEditsOverlay,
-  mediaMap: Record<string, MediaAttachment>
+  edits?: ProjectEditsOverlay,
+  mediaMap: Record<string, MediaAttachment> = {}
 ): Uint8Array {
   const wb = XLSX.utils.book_new();
 
-  // Merge edits into events, microIterations, kombis
   const mergedEvents = dataset.events.map((ev) => {
-    const patch = edits.events[ev.eventId];
+    const patch = edits?.events[ev.eventId];
     const statusCode = patch?.statusCode ?? ev.statusCode;
     const refCandidate = patch?.mediaRef ?? ev.mediaRef;
     const resolvedMediaRef =
@@ -1287,7 +1434,7 @@ export function buildUpdatedWorkbookBytes(
       ...ev,
       statusCode,
       planningCategoryFig2: derivePlanningCategoryFromStatus(statusCode),
-      variationType: deriveVariationTypeFromStatus(statusCode),
+      variationType: deriveVariationTypeFromStatus(statusCode, 'en'),
       stateDescription: patch?.stateDescription ?? ev.stateDescription,
       rationale: patch?.rationale ?? ev.rationale,
       mediaRef: resolvedMediaRef,
@@ -1295,7 +1442,7 @@ export function buildUpdatedWorkbookBytes(
   });
 
   const mergedMicro = dataset.microIterations.map((m) => {
-    const patch = edits.microIterations[m.id];
+    const patch = edits?.microIterations[m.id];
     const refCandidate = patch?.mediaRef ?? m.mediaRef;
     const resolvedMediaRef =
       refCandidate ||
@@ -1310,7 +1457,7 @@ export function buildUpdatedWorkbookBytes(
   });
 
   const mergedKombis = dataset.kombis.map((k) => {
-    const patch = edits.kombis[k.kombiId];
+    const patch = edits?.kombis[k.kombiId];
     const refCandidate = patch?.mediaRef ?? k.mediaRef;
     const resolvedMediaRef =
       refCandidate ||
@@ -1325,16 +1472,15 @@ export function buildUpdatedWorkbookBytes(
     };
   });
 
-  // Recompute matrix rows reflecting edited event statuses
   const evByRse = new Map<string, RsePhaseEvent[]>();
   for (const ev of mergedEvents) {
     const list = evByRse.get(ev.rseId) ?? [];
     list.push(ev);
     evByRse.set(ev.rseId, list);
   }
+
   const recomputedMatrix = dataset.rseList.map((rse) => {
     const statusByVersionKey = deriveMatrixRowFromEvents(
-      rse,
       dataset.versions,
       evByRse.get(rse.rseId) ?? []
     );
@@ -1396,11 +1542,7 @@ export function buildUpdatedWorkbookBytes(
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sgeRows), 'SGE_Auswertung');
 
   // 3. RSE_Phasenmatrix
-  XLSX.utils.book_append_sheet(
-    wb,
-    XLSX.utils.json_to_sheet(recomputedMatrix),
-    'RSE_Phasenmatrix'
-  );
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(recomputedMatrix), 'RSE_Phasenmatrix');
 
   // 4. RSE_Stammdaten
   XLSX.utils.book_append_sheet(
@@ -1454,7 +1596,26 @@ export function buildUpdatedWorkbookBytes(
     'RSE_Phasenwechsel'
   );
 
-  // 6. Bauteil_Integrationen
+  // 6. RSE_Referenzen (structured references for each event)
+  const refRows: Record<string, string>[] = [];
+  for (const ev of mergedEvents) {
+    for (const ref of ev.references) {
+      refRows.push({
+        Ref_ID: ref.id,
+        Event_ID: ev.eventId,
+        Ziel_RSE_ID: ev.rseId,
+        Version: ev.version,
+        Ref_RSE_ID: ref.refRseId,
+        Ref_Bezeichnung: ref.refName,
+        Herkunft_Generation: ref.originGeneration,
+        Variationsart: ref.variationType,
+        Begruendung: ref.rationale,
+      });
+    }
+  }
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(refRows), 'RSE_Referenzen');
+
+  // 7. Bauteil_Integrationen
   XLSX.utils.book_append_sheet(
     wb,
     XLSX.utils.json_to_sheet(
@@ -1473,14 +1634,18 @@ export function buildUpdatedWorkbookBytes(
     'Bauteil_Integrationen'
   );
 
-  // 7. Phasen_Konfiguration
+  // 8. Phasen_Konfiguration (with G_n, E_{n,m}, ME G_n)
   XLSX.utils.book_append_sheet(
     wb,
     XLSX.utils.json_to_sheet(
       dataset.versions.map((v) => ({
         Version_Key: v.versionKey,
         Sortier_Nr: v.sortOrder,
+        Generation_ID: v.generationId,
+        Generation_Name: v.generationName,
+        Engineering_Gen_ID: v.engineeringGenId,
         Phasen_Name: v.phaseName,
+        Meilenstein_Label: v.milestoneLabel || '-',
         Meilenstein_Badge: v.milestoneBadge || '-',
         'Technischer Systemstand & Einordnung': v.systemStateSummary,
       }))
@@ -1488,7 +1653,7 @@ export function buildUpdatedWorkbookBytes(
     'Phasen_Konfiguration'
   );
 
-  // 8. Entwicklungsschritte
+  // 9. Entwicklungsschritte
   XLSX.utils.book_append_sheet(
     wb,
     XLSX.utils.json_to_sheet(
@@ -1509,7 +1674,7 @@ export function buildUpdatedWorkbookBytes(
     'Entwicklungsschritte'
   );
 
-  // 9. Ursachen_Tests_Befunde
+  // 10. Ursachen_Tests_Befunde
   XLSX.utils.book_append_sheet(
     wb,
     XLSX.utils.json_to_sheet(
@@ -1528,7 +1693,7 @@ export function buildUpdatedWorkbookBytes(
     'Ursachen_Tests_Befunde'
   );
 
-  // 10. Verbindungen_Pfeile
+  // 11. Verbindungen_Pfeile
   XLSX.utils.book_append_sheet(
     wb,
     XLSX.utils.json_to_sheet(
@@ -1546,7 +1711,7 @@ export function buildUpdatedWorkbookBytes(
     'Verbindungen_Pfeile'
   );
 
-  // 11. Mikro_Iterationen
+  // 12. Mikro_Iterationen
   XLSX.utils.book_append_sheet(
     wb,
     XLSX.utils.json_to_sheet(
@@ -1557,6 +1722,7 @@ export function buildUpdatedWorkbookBytes(
         Version: m.version,
         Gehört_zu_Schritt: m.parentStepId,
         Sub_Version_ID: m.subVersionId,
+        Variationsart: m.variationType ?? 'AV',
         'Konstruktive / Fertigungstechnische Änderung': m.change,
         'Beobachtetes Ergebnis': m.result,
         Bewertung: m.evaluation,
@@ -1566,7 +1732,7 @@ export function buildUpdatedWorkbookBytes(
     'Mikro_Iterationen'
   );
 
-  // 12. Methodik_Learnings
+  // 13. Methodik_Learnings
   XLSX.utils.book_append_sheet(
     wb,
     XLSX.utils.json_to_sheet(
@@ -1584,7 +1750,7 @@ export function buildUpdatedWorkbookBytes(
     'Methodik_Learnings'
   );
 
-  // 13. Vorab_Dimensionierung
+  // 14. Vorab_Dimensionierung
   XLSX.utils.book_append_sheet(
     wb,
     XLSX.utils.json_to_sheet(
@@ -1606,21 +1772,426 @@ export function buildUpdatedWorkbookBytes(
   return new Uint8Array(out as ArrayBuffer);
 }
 
-export function downloadUpdatedXlsx(
-  dataset: SgeDataset,
-  edits: ProjectEditsOverlay,
-  mediaMap: Record<string, MediaAttachment>
-): void {
-  const bytes = buildUpdatedWorkbookBytes(dataset, edits, mediaMap);
+function triggerXlsxDownload(bytes: Uint8Array, fileName: string): void {
   const blob = new Blob([bytes.buffer as ArrayBuffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'Duckomat_Entwicklungsdatenbank_v14_aktualisiert.xlsx';
+  a.download = fileName;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+export function downloadUpdatedXlsx(
+  dataset: SgeDataset,
+  edits?: ProjectEditsOverlay,
+  mediaMap: Record<string, MediaAttachment> = {}
+): void {
+  const bytes = buildUpdatedWorkbookBytes(dataset, edits, mediaMap);
+  triggerXlsxDownload(bytes, 'Duckomat_Entwicklungsdatenbank_SGE_aktualisiert.xlsx');
+}
+
+export function downloadSampleProjectXlsx(
+  dataset: SgeDataset,
+  mediaMap: Record<string, MediaAttachment> = {}
+): void {
+  const bytes = buildUpdatedWorkbookBytes(dataset, undefined, mediaMap);
+  triggerXlsxDownload(bytes, 'Duckomat_SGE_Beispielprojekt_G0_G3.xlsx');
+}
+
+/**
+ * Generates and downloads a clean empty SGE Excel template including an instructional
+ * sheet ("Anleitung_SGE_Modell") explaining G_n, E_{n,m}, ME G_n, CV/AV/PV, and RSE_Referenzen.
+ */
+export function buildEmptySgeTemplateBytes(): Uint8Array {
+  const wb = XLSX.utils.book_new();
+
+  // Sheet 0: Anleitung_SGE_Modell
+  const guideRows = [
+    {
+      Abschnitt: '1. Generationen-Hierarchie (G_n & E_{n,m})',
+      Konzept: 'Systemgenerationen G_0 .. G_n',
+      Erklaerung:
+        'G_0 bezeichnet das Referenzsystem (Gen. n-1). G_1, G_2, G_3 ... sind die Systemgenerationen (z. B. G_1: GSD-Abschluss, G_2: Entenrennen, G_3: Antrittsvorlesung / Aktueller Stand).',
+      Beispiel: 'Generation_ID = G_1; Engineering_Gen_ID = E_{1,1}; Meilenstein_Label = ME G_1',
+    },
+    {
+      Abschnitt: '1. Generationen-Hierarchie (G_n & E_{n,m})',
+      Konzept: 'Engineering Generations E_{n,m}',
+      Erklaerung:
+        'Zwischenstände innerhalb der Entwicklung von G_n werden als E_{n,1}, E_{n,2}, ... dokumentiert und münden im Meilenstein ME G_n.',
+      Beispiel: 'E_{3,1} -> E_{3,2} -> E_{3,3} -> E_{3,4} (ME G_3)',
+    },
+    {
+      Abschnitt: '2. Kanonische SGE-Variationsarten (Albers et al.)',
+      Konzept: 'CV – Carryover Variation (ÜV)',
+      Erklaerung:
+        'Element/Subsystem aus Referenzsystem übernommen (max. Schnittstellenanpassung). Erzeugt in der 2D-Swimlane KEINEN Kasten (nur Referenzzähler).',
+      Beispiel: 'Status_Code = CV',
+    },
+    {
+      Abschnitt: '2. Kanonische SGE-Variationsarten (Albers et al.)',
+      Konzept: 'AV – Attribute Variation',
+      Erklaerung:
+        'Prinzip & Struktur bleiben erhalten; Attribute/Geometrie/Werkstoff werden angepasst. Geplant: EC-AV, Ungeplant: UD-AV.',
+      Beispiel: 'Status_Code = EC-AV oder UD-AV',
+    },
+    {
+      Abschnitt: '2. Kanonische SGE-Variationsarten (Albers et al.)',
+      Konzept: 'PV – Principle Variation',
+      Erklaerung:
+        'Elemente und Wirkzusammenhänge werden geändert (EC-PV / UD-PV), neu hinzugefügt (NEW) oder entfernt/ersetzt (REM / Entfall).',
+      Beispiel: 'Status_Code = EC-PV, UD-PV, NEW oder REM',
+    },
+    {
+      Abschnitt: '3. Referenz-Zuordnung (RSE_Referenzen)',
+      Konzept: 'Genutzte Referenzsystemelemente pro Schritt',
+      Erklaerung:
+        'Im Blatt RSE_Referenzen werden je Event_ID alle referenzierten RSE aus G_{n-1} oder extern mit ihrer Variationsart (CV, AV, PV, REM) und Begründung erfasst.',
+      Beispiel: 'Event_ID = EV001; Ref_RSE_ID = R1.1; Herkunft_Generation = G_0; Variationsart = AV',
+    },
+    {
+      Abschnitt: '4. Medien & Fotos (Medien_Ref)',
+      Konzept: 'Relative Pfade im Repo',
+      Erklaerung:
+        'Tragen Sie relative Pfade wie media/v1_0_R1_1.png ein. Hochgeladene Fotos werden beim ZIP-Export automatisch unter public/media/ abgelegt.',
+      Beispiel: 'Medien_Ref = media/E1_1_R1_1.png',
+    },
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(guideRows), 'Anleitung_SGE_Modell');
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      {
+        Spur_ID: 'S1_Rahmen_Peripherie',
+        'Systemspur / Baugruppe': 'Rahmen & Peripherie',
+        'Rolle im Gesamtsystem': 'Beschreibung der Baugruppenrolle',
+        'RSE gesamt': 1,
+        'Aktive RSE (v2.2)': 1,
+        'Entfernt / Ersetzt': 0,
+        'Integrierte RSE (Kombi)': 0,
+        'Versions-Events': 2,
+        'Mikro-Iterationen': 0,
+        'Events geprüft': '2 / 2',
+        'Aktueller Reifegrad (SGE-Überblick)': 'Kurzfassung Reifegrad',
+      },
+    ]),
+    'Überblick_Dashboard'
+  );
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      {
+        Version_Key: 'v0.0',
+        Sortier_Nr: 1,
+        Generation_ID: 'G_0',
+        Generation_Name: 'Referenzsystem (Gen. n-1)',
+        Engineering_Gen_ID: 'G_0',
+        Phasen_Name: 'v0.0 Referenzsystem',
+        Meilenstein_Label: 'Ref. G_0',
+        Meilenstein_Badge: 'Referenz (G_0)',
+        'Technischer Systemstand & Einordnung': 'Ausgangssystem der Vorgängergeneration.',
+      },
+      {
+        Version_Key: 'v1.0',
+        Sortier_Nr: 2,
+        Generation_ID: 'G_1',
+        Generation_Name: 'GSD-Abschluss',
+        Engineering_Gen_ID: 'E_{1,1}',
+        Phasen_Name: 'v1.0 GSD-Abschluss',
+        Meilenstein_Label: 'ME G_1',
+        Meilenstein_Badge: 'ME G_1: GSD-Abschluss',
+        'Technischer Systemstand & Einordnung': 'Erste Systemgeneration G_1.',
+      },
+      {
+        Version_Key: 'v2.0',
+        Sortier_Nr: 3,
+        Generation_ID: 'G_2',
+        Generation_Name: 'Entenrennen',
+        Engineering_Gen_ID: 'E_{2,1}',
+        Phasen_Name: 'v2.0 Entenrennen',
+        Meilenstein_Label: 'ME G_2',
+        Meilenstein_Badge: 'ME G_2: Entenrennen',
+        'Technischer Systemstand & Einordnung': 'Zweite Systemgeneration G_2.',
+      },
+    ]),
+    'Phasen_Konfiguration'
+  );
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      {
+        RSE_ID: 'R1.1',
+        Spur: 'S1_Rahmen_Peripherie',
+        RSE_Bezeichnung: 'Beispiel-Referenzsystemelement',
+        Herkunft: 'Vorgängermodell (Gen. n-1)',
+        Erste_Version: 'v0.0 Referenzsystem',
+        Erste_Ver_Nr: 1,
+        Entfall_Version: '',
+        Entfall_Ver_Nr: 999,
+        Aktueller_Lebenszyklus: 'Aktiv',
+        Vorgaenger_oder_Ersatz_RSE: '',
+        Aktuelle_Kombi_ID: '',
+        RSE_Anzahl_im_Bauteil: 1,
+        Anzahl_Versions_Events: 2,
+        Anzahl_Mikro_Iterationen: 0,
+        Pruefstatus_Inhalt: 'Vorlage',
+        Kurzbeschreibung_Funktion: 'Kurzbeschreibung der Funktion dieses RSE.',
+      },
+    ]),
+    'RSE_Stammdaten'
+  );
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      {
+        Event_ID: 'EV001',
+        RSE_ID: 'R1.1',
+        Spur: 'S1_Rahmen_Peripherie',
+        Version: 'v0.0 Referenzsystem',
+        Version_Nr: 1,
+        Lookup_Key: 'R1.1|1',
+        Status_Code: 'BASE',
+        Planungs_Kategorie_Fig2: 'Referenzsystem G_0 (Grau)',
+        SGE_Variationstyp: 'Referenzsystem (G_0)',
+        Kombi_Bauteil_ID: '',
+        Kurzbeschreibung_Zustand: 'Ausgangsstand aus Referenzsystem G_0.',
+        Begruendung: 'Referenzbasis',
+        Ursache_ID: '',
+        Schritt_ID: 'E01',
+        Pruefstatus_Inhalt: 'Vorlage',
+        Medien_Ref: '',
+      },
+      {
+        Event_ID: 'EV002',
+        RSE_ID: 'R1.1',
+        Spur: 'S1_Rahmen_Peripherie',
+        Version: 'v1.0 GSD-Abschluss',
+        Version_Nr: 2,
+        Lookup_Key: 'R1.1|2',
+        Status_Code: 'EC-AV',
+        Planungs_Kategorie_Fig2: 'Engineering change (Orange)',
+        SGE_Variationstyp: 'AV (Attribute Variation)',
+        Kombi_Bauteil_ID: '',
+        Kurzbeschreibung_Zustand: 'Geometrie/Material angepasst (Attribute Variation).',
+        Begruendung: 'Gewichts- und Bauraumoptimierung',
+        Ursache_ID: 'U01',
+        Schritt_ID: 'E02',
+        Pruefstatus_Inhalt: 'Vorlage',
+        Medien_Ref: '',
+      },
+    ]),
+    'RSE_Phasenwechsel'
+  );
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      {
+        RSE_ID: 'R1.1',
+        Spur: 'S1_Rahmen_Peripherie',
+        RSE_Bezeichnung: 'Beispiel-Referenzsystemelement',
+        Kombi_ID: '',
+        'v0.0 Referenzsystem': 'BASE',
+        'v1.0 GSD-Abschluss': 'EC-AV',
+        'v2.0 Entenrennen': 'CV',
+      },
+    ]),
+    'RSE_Phasenmatrix'
+  );
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      {
+        Ref_ID: 'EV002_ref_1',
+        Event_ID: 'EV002',
+        Ziel_RSE_ID: 'R1.1',
+        Version: 'v1.0 GSD-Abschluss',
+        Ref_RSE_ID: 'R1.1',
+        Ref_Bezeichnung: 'Beispiel-Referenzsystemelement',
+        Herkunft_Generation: 'G_0',
+        Variationsart: 'AV',
+        Begruendung: 'Geometrie- und Werkstoffanpassung bei gleichbleibendem Wirkprinzip.',
+      },
+    ]),
+    'RSE_Referenzen'
+  );
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      {
+        Kombi_ID: 'KOMBI-01',
+        Bauteil_Bezeichnung: '',
+        Integration_ab_Phase: '',
+        Anzahl_RSE_im_Bauteil: 0,
+        Beteiligte_RSE_IDs: '',
+        Beteiligte_Spuren: '',
+        SGE_Variationsart: 'PV (Funktionsintegration)',
+        Begruendung_Funktionsintegration: '',
+        Medien_Ref: '',
+      },
+    ]),
+    'Bauteil_Integrationen'
+  );
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      {
+        Detail_Box: 'Box A1',
+        RSE_ID: 'R1.1',
+        Spur: 'S1_Rahmen_Peripherie',
+        Version: 'v1.0 GSD-Abschluss',
+        Gehört_zu_Schritt: 'E02',
+        Sub_Version_ID: 'E1_1_M1',
+        Variationsart: 'AV',
+        'Konstruktive / Fertigungstechnische Änderung': 'Erste Detailiteration (Vorlage)',
+        'Beobachtetes Ergebnis': 'Funktion bestätigt',
+        Bewertung: 'Übernommen',
+        Medien_Ref: '',
+      },
+    ]),
+    'Mikro_Iterationen'
+  );
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      {
+        Schritt_ID: 'E01',
+        Spur: 'S1_Rahmen_Peripherie',
+        RSE_ID: 'R1.1',
+        Version: 'v0.0 Referenzsystem',
+        Version_Nr: 1,
+        Schritt_Typ: 'Ausgangsstand',
+        Kurz_Titel: 'Referenzstand G_0',
+        'Konstruktive / Logische Ausführung (Was wurde gebaut/geändert?)': 'Referenzstand',
+        Automatischer_Stand: 'Überarbeitet / Abgelöst',
+        Detail_Box: '',
+        Learnings: '',
+      },
+      {
+        Schritt_ID: 'E02',
+        Spur: 'S1_Rahmen_Peripherie',
+        RSE_ID: 'R1.1',
+        Version: 'v1.0 GSD-Abschluss',
+        Version_Nr: 2,
+        Schritt_Typ: 'Weiterentwicklung',
+        Kurz_Titel: 'Attributvariation G_1',
+        'Konstruktive / Logische Ausführung (Was wurde gebaut/geändert?)': 'Geometrie angepasst',
+        Automatischer_Stand: 'Aktueller Stand (Final)',
+        Detail_Box: 'Box A1',
+        Learnings: 'M01',
+      },
+    ]),
+    'Entwicklungsschritte'
+  );
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      {
+        Ursache_ID: 'U01',
+        Kategorie: 'Planung / Anforderung',
+        Spur_Bezug: 'S1_Rahmen_Peripherie',
+        Betroffener_Schritt: 'E01',
+        Ausgeloester_Schritt: 'E02',
+        'Kurz_Titel (Befund / Test / Problem)': 'Beispiel-Befund',
+        'Dokumentierte Beobachtung / Fakt': 'Messbare Beobachtung / Fakt.',
+        'Hypothese / Grenze der Nachweiskraft': 'Abgeleitete Hypothese.',
+        Learnings: 'M01',
+      },
+    ]),
+    'Ursachen_Tests_Befunde'
+  );
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      {
+        Pfeil_ID: 'P_01',
+        Von_Schritt_ID: 'E01',
+        Nach_Schritt_ID: 'E02',
+        'Pfeil_Typ (Visuelle Darstellung)': 'Weiterentwicklung (Optimierung)',
+        Begruendung_Ursache_ID: 'U01',
+        Spur_Bezug: 'S1 -> S1',
+        'Begründung des Entwicklungsschritts (Anzeige am Pfeil)': 'Begründung der AV.',
+        Wirkrichtung_Layout: 'Versionsübergreifend: Links -> Rechts',
+      },
+    ]),
+    'Verbindungen_Pfeile'
+  );
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      {
+        Learning_ID: 'M01',
+        Themenfeld: 'Konstruktionsmethodik',
+        Kurz_Titel_Learning: 'Beispiel-Learning',
+        'Übertragbares Prinzip (losgelöst vom Duckomat)': 'Allgemeines Gestaltungsprinzip.',
+        'Konkretes Projektbeispiel (Anker in Datenbank)': 'Anwendung in E02.',
+        Verknuepfte_Schritte: 'E02',
+        Verknuepfte_Ursachen: 'U01',
+        'Wissenschaftliche Einordnung (DRM / Paper-Mehrwert)': 'Einordnung im SGE-Kontext.',
+      },
+    ]),
+    'Methodik_Learnings'
+  );
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      {
+        'Parameter-ID': 'D01',
+        Teilbereich: 'Allgemein',
+        'Größe / Parameter': 'Beispiel-Parameter',
+        Wert: '100',
+        Einheit: 'mm',
+        'Excel-Formel / Herkunft': 'Messung',
+        'Evidenz-Typ': 'Messwert',
+        'Methodische Einordnung / Kritische Prüfung': '',
+      },
+    ]),
+    'Vorab_Dimensionierung'
+  );
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      {
+        'SGE_Kennzahl / Status_Code': 'CV – Carryover Variation',
+        'v0.0 Referenzsystem': '0',
+        'v1.0 GSD-Abschluss': '0',
+        'v2.0 Entenrennen': '1',
+        Gesamt_Events_oder_Stand: '1',
+      },
+      {
+        'SGE_Kennzahl / Status_Code': 'AV – Attribute Variation (EC-AV + UD-AV)',
+        'v0.0 Referenzsystem': '0',
+        'v1.0 GSD-Abschluss': '1',
+        'v2.0 Entenrennen': '0',
+        Gesamt_Events_oder_Stand: '1',
+      },
+    ]),
+    'SGE_Auswertung'
+  );
+
+  const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  return new Uint8Array(out as ArrayBuffer);
+}
+
+export function downloadEmptySgeTemplateXlsx(): void {
+  const bytes = buildEmptySgeTemplateBytes();
+  triggerXlsxDownload(bytes, 'SGE_Entwicklungsdatenbank_Leeres_Template.xlsx');
 }

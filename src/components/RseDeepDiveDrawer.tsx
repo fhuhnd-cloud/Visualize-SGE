@@ -19,7 +19,9 @@ import {
   ColorMode,
   CustomPalette,
   MediaAttachment,
+  NomenclatureLang,
   PhaseVersionConfig,
+  RseReferenceLink,
   SgeDataset,
   StatusCode,
 } from '../types/sge';
@@ -32,12 +34,16 @@ import {
 import {
   ALL_STATUS_CODES,
   EDGE_STYLES,
+  VARIATION_MARKER_COLORS,
+  formatStatusCodeDisplay,
+  formatVariationCode,
   getLaneDisplayName,
   getSwatchForStatus,
 } from '../utils/sgeVisualConfig';
 import { ModalState } from './EntityEditModals';
 import { LightboxPayload } from './LightboxModal';
 import { MediaDropzone } from './MediaDropzone';
+import { ReferenceBarAndTable } from './ReferenceBarAndTable';
 
 interface RseDeepDiveDrawerProps {
   rseId: string | null;
@@ -45,6 +51,7 @@ interface RseDeepDiveDrawerProps {
   dataset: SgeDataset;
   selectedVersion: PhaseVersionConfig;
   appMode: AppMode;
+  lang: NomenclatureLang;
   colorMode: ColorMode;
   palette: CustomPalette;
   mediaMap: Record<string, MediaAttachment>;
@@ -52,6 +59,13 @@ interface RseDeepDiveDrawerProps {
   onSelectRse: (rseId: string) => void;
   onSelectVersionIndex: (index: number) => void;
   onQuickStatusChange: (rseId: string, versionKey: string, nextStatus: StatusCode) => void;
+  onAddEventReference: (eventId: string, ref: Omit<RseReferenceLink, 'id'>) => void;
+  onUpdateEventReference: (
+    eventId: string,
+    refId: string,
+    patch: Partial<Omit<RseReferenceLink, 'id'>>
+  ) => void;
+  onDeleteEventReference: (eventId: string, refId: string) => void;
   onAddMicroIteration: (input: {
     rseId: string;
     versionKey: string;
@@ -79,6 +93,7 @@ export const RseDeepDiveDrawer: React.FC<RseDeepDiveDrawerProps> = ({
   dataset,
   selectedVersion,
   appMode,
+  lang,
   colorMode,
   palette,
   mediaMap,
@@ -86,6 +101,9 @@ export const RseDeepDiveDrawer: React.FC<RseDeepDiveDrawerProps> = ({
   onSelectRse,
   onSelectVersionIndex,
   onQuickStatusChange,
+  onAddEventReference,
+  onUpdateEventReference,
+  onDeleteEventReference,
   onAddMicroIteration,
   onEditMicroIteration,
   onDeleteMicroIteration,
@@ -731,6 +749,9 @@ export const RseDeepDiveDrawer: React.FC<RseDeepDiveDrawerProps> = ({
                       className="flex flex-wrap items-center justify-between gap-2 rounded-t-[10px] border-b px-3 py-2 text-xs"
                     >
                       <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded bg-white/85 px-1.5 py-0.2 font-mono text-[10px] font-bold text-slate-800">
+                          {ver.generationId} · {ver.engineeringGenId}
+                        </span>
                         <span className="font-mono font-bold">{ver.phaseName}</span>
                         {isEdit && effectiveStatus ? (
                           <select
@@ -746,7 +767,7 @@ export const RseDeepDiveDrawer: React.FC<RseDeepDiveDrawerProps> = ({
                           >
                             {ALL_STATUS_CODES.map((c) => (
                               <option key={c} value={c}>
-                                {c}
+                                {formatStatusCodeDisplay(c, lang)}
                               </option>
                             ))}
                           </select>
@@ -756,7 +777,7 @@ export const RseDeepDiveDrawer: React.FC<RseDeepDiveDrawerProps> = ({
                               style={{ borderColor: swatch.border }}
                               className="rounded border bg-white/85 px-1.5 py-0.5 font-mono text-[10px] font-bold"
                             >
-                              {effectiveStatus}
+                              {formatStatusCodeDisplay(effectiveStatus, lang)}
                             </span>
                           )
                         )}
@@ -967,6 +988,20 @@ export const RseDeepDiveDrawer: React.FC<RseDeepDiveDrawerProps> = ({
                             );
                           })}
 
+                          {/* Expandable Structured Reference Table inside Event */}
+                          <ReferenceBarAndTable
+                            eventId={ev.eventId}
+                            references={ev.references}
+                            rseList={dataset.rseList}
+                            appMode={appMode}
+                            lang={lang}
+                            defaultExpanded={ev.references.length > 0}
+                            onAddReference={onAddEventReference}
+                            onUpdateReference={onUpdateEventReference}
+                            onDeleteReference={onDeleteEventReference}
+                            onSelectRse={onSelectRse}
+                          />
+
                           {/* Event Photo Dropzone (hidden when empty in Presentation Mode) */}
                           <MediaDropzone
                             refKey={ev.mediaRef || `event:${ev.eventId}`}
@@ -1023,6 +1058,18 @@ export const RseDeepDiveDrawer: React.FC<RseDeepDiveDrawerProps> = ({
                                         <span className="font-mono text-[11px] font-bold text-slate-900 dark:text-slate-100">
                                           {m.subVersionId || m.id}
                                         </span>
+                                        {m.variationType && (
+                                          <span
+                                            style={{
+                                              backgroundColor: VARIATION_MARKER_COLORS[m.variationType].bg,
+                                              borderColor: VARIATION_MARKER_COLORS[m.variationType].border,
+                                              color: VARIATION_MARKER_COLORS[m.variationType].text,
+                                            }}
+                                            className="rounded border px-1 py-0.2 font-mono text-[9.5px] font-bold"
+                                          >
+                                            {formatVariationCode(m.variationType, lang)}
+                                          </span>
+                                        )}
                                         <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
                                           {m.detailBox}
                                         </span>

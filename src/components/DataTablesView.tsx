@@ -179,9 +179,11 @@ export const DataTablesView: React.FC<DataTablesViewProps> = ({
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-400">
                   <th className="px-3 py-2">Nr</th>
+                  <th className="px-3 py-2">Generation_ID</th>
+                  <th className="px-3 py-2">Engineering_Gen_ID</th>
                   <th className="px-3 py-2">Version_Key</th>
                   <th className="px-3 py-2">Phasen_Name</th>
-                  <th className="px-3 py-2">Meilenstein_Badge</th>
+                  <th className="px-3 py-2">Meilenstein</th>
                   <th className="px-3 py-2">Technischer Systemstand & Einordnung</th>
                 </tr>
               </thead>
@@ -203,12 +205,18 @@ export const DataTablesView: React.FC<DataTablesViewProps> = ({
                         )}
                       </div>
                     </td>
+                    <td className="px-3 py-2 font-mono font-bold text-slate-900 dark:text-white whitespace-nowrap">
+                      {v.generationId}
+                    </td>
+                    <td className="px-3 py-2 font-mono text-blue-700 dark:text-blue-400 whitespace-nowrap">
+                      {v.engineeringGenId}
+                    </td>
                     <td className="px-3 py-2 font-mono">{v.versionKey}</td>
                     <td className="px-3 py-2 font-semibold whitespace-nowrap">{v.phaseName}</td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      {v.milestoneBadge ? (
+                      {v.milestoneLabel || v.milestoneBadge ? (
                         <span className="rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-900 dark:border-amber-700 dark:bg-amber-950/60 dark:text-amber-200">
-                          {v.milestoneBadge}
+                          {v.milestoneLabel || v.milestoneBadge}
                         </span>
                       ) : (
                         '—'

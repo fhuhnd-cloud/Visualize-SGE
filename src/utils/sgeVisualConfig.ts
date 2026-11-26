@@ -2,7 +2,9 @@ import {
   ColorMode,
   CustomPalette,
   EdgeCategory,
+  NomenclatureLang,
   PaletteSwatch,
+  SgeVariationKind,
   StatusCode,
   StatusColorGroup,
 } from '../types/sge';
@@ -59,9 +61,47 @@ export const DEFAULT_SGE_PALETTE: CustomPalette = {
   },
 };
 
+/** Clean high-contrast variation marker colors (for dots, corners, stacked bars, reference badges) */
+export const VARIATION_MARKER_COLORS: Record<
+  SgeVariationKind | 'BASE',
+  { dot: string; bg: string; border: string; text: string }
+> = {
+  BASE: {
+    dot: '#64748B',
+    bg: '#F1F5F9',
+    border: '#64748B',
+    text: '#334155',
+  },
+  CV: {
+    dot: '#2563EB',
+    bg: '#DBEAFE',
+    border: '#2563EB',
+    text: '#1E3A8A',
+  },
+  AV: {
+    dot: '#EA580C',
+    bg: '#FFEDD5',
+    border: '#EA580C',
+    text: '#9A3412',
+  },
+  PV: {
+    dot: '#7C3AED',
+    bg: '#F3E8FF',
+    border: '#7C3AED',
+    text: '#5B21B6',
+  },
+  REM: {
+    dot: '#DC2626',
+    bg: '#FEE2E2',
+    border: '#DC2626',
+    text: '#991B1B',
+  },
+};
+
 export interface LegendItemMeta {
   group: StatusColorGroup;
   codeLabel: string;
+  codeLabelDe?: string;
   title: string;
   subtitle: string;
 }
@@ -69,39 +109,40 @@ export interface LegendItemMeta {
 export const SGE_LEGEND_ITEMS: LegendItemMeta[] = [
   {
     group: 'BASE',
-    codeLabel: 'BASE',
-    title: 'Ausgangsstand',
-    subtitle: 'Gen. n-1 Referenz',
+    codeLabel: 'BASE (G₀)',
+    title: 'Referenzsystem',
+    subtitle: 'Gen. n-1 Ausgangsstand',
   },
   {
     group: 'CV',
     codeLabel: 'CV',
-    title: 'Carry over',
-    subtitle: 'Übernahmevariation (ÜV)',
-  },
-  {
-    group: 'NEW',
-    codeLabel: 'NEW',
-    title: 'Newly added',
-    subtitle: 'Neu & Extern',
+    codeLabelDe: 'ÜV',
+    title: 'Carryover Variation',
+    subtitle: 'Übernahmevariation (ohne Kasten in 2D)',
   },
   {
     group: 'EC',
-    codeLabel: 'EC-GV / EC-PV',
-    title: 'Engineering change',
-    subtitle: 'Geplante Änderung',
+    codeLabel: 'AV / PV (EC)',
+    title: 'Geplante Variation',
+    subtitle: 'EC-AV (Attribute) & EC-PV (Principle)',
   },
   {
     group: 'UD',
-    codeLabel: 'UD-GV / UD-PV',
-    title: 'Unplanned deviation',
-    subtitle: 'Ungeplante Abweichung',
+    codeLabel: 'AV / PV (UD)',
+    title: 'Ungeplante Abweichung',
+    subtitle: 'UD-AV (Attribute) & UD-PV (Principle)',
+  },
+  {
+    group: 'NEW',
+    codeLabel: 'PV (NEW)',
+    title: 'Neu / Extern',
+    subtitle: 'Prinzipvariation: neu hinzugefügt',
   },
   {
     group: 'REM',
-    codeLabel: 'REM',
-    title: 'Removed',
-    subtitle: 'Entfernt / ersetzt',
+    codeLabel: 'Entfall (REM)',
+    title: 'Entfernt / Ersetzt',
+    subtitle: 'Prinzipvariation: Element entfernt',
   },
   {
     group: 'KOMBI',
@@ -115,12 +156,34 @@ export const ALL_STATUS_CODES: StatusCode[] = [
   'BASE',
   'CV',
   'NEW',
-  'EC-GV',
+  'EC-AV',
   'EC-PV',
-  'UD-GV',
+  'UD-AV',
   'UD-PV',
   'REM',
 ];
+
+export function statusCodeToVariationKind(code: StatusCode | ''): SgeVariationKind {
+  switch (code) {
+    case 'CV':
+    case 'BASE':
+      return 'CV';
+    case 'EC-AV':
+    case 'UD-AV':
+      return 'AV';
+    case 'REM':
+      return 'REM';
+    case 'NEW':
+    case 'EC-PV':
+    case 'UD-PV':
+    default:
+      return 'PV';
+  }
+}
+
+export function isPlannedStatusCode(code: StatusCode): boolean {
+  return code !== 'UD-AV' && code !== 'UD-PV';
+}
 
 export function statusCodeToColorGroup(code: StatusCode): StatusColorGroup {
   switch (code) {
@@ -130,10 +193,10 @@ export function statusCodeToColorGroup(code: StatusCode): StatusColorGroup {
       return 'CV';
     case 'NEW':
       return 'NEW';
-    case 'EC-GV':
+    case 'EC-AV':
     case 'EC-PV':
       return 'EC';
-    case 'UD-GV':
+    case 'UD-AV':
     case 'UD-PV':
       return 'UD';
     case 'REM':
@@ -141,42 +204,83 @@ export function statusCodeToColorGroup(code: StatusCode): StatusColorGroup {
   }
 }
 
-export function derivePlanningCategoryFromStatus(code: StatusCode): string {
-  switch (code) {
-    case 'BASE':
-      return 'Ausgangsstand (Grau)';
+/** Formats canonical variation label according to EN (CV/AV/PV) or DE (ÜV/AV/PV) toggle */
+export function formatVariationCode(
+  kind: SgeVariationKind,
+  lang: NomenclatureLang = 'en'
+): string {
+  if (kind === 'CV') return lang === 'de' ? 'ÜV' : 'CV';
+  if (kind === 'AV') return 'AV';
+  if (kind === 'PV') return 'PV';
+  return lang === 'de' ? 'Entfall' : 'REM';
+}
+
+export function formatStatusCodeDisplay(
+  code: StatusCode | '',
+  lang: NomenclatureLang = 'en'
+): string {
+  if (!code) return '—';
+  if (code === 'CV') return lang === 'de' ? 'ÜV' : 'CV';
+  if (code === 'REM') return lang === 'de' ? 'Entfall' : 'REM';
+  return code;
+}
+
+export function getVariationFullName(
+  kind: SgeVariationKind,
+  lang: NomenclatureLang = 'en'
+): string {
+  if (lang === 'de') {
+    switch (kind) {
+      case 'CV':
+        return 'ÜV (Übernahmevariation)';
+      case 'AV':
+        return 'AV (Attribut-/Eigenschaftsvariation)';
+      case 'PV':
+        return 'PV (Prinzipvariation)';
+      case 'REM':
+        return 'Entfall (PV− / Entfernt)';
+    }
+  }
+  switch (kind) {
     case 'CV':
-      return 'Carry over (Blau)';
-    case 'NEW':
-      return 'Newly added (Violett)';
-    case 'EC-GV':
-    case 'EC-PV':
-      return 'Engineering change (Orange)';
-    case 'UD-GV':
-    case 'UD-PV':
-      return 'Unplanned deviation (Gelb)';
+      return 'CV (Carryover Variation)';
+    case 'AV':
+      return 'AV (Attribute Variation)';
+    case 'PV':
+      return 'PV (Principle Variation)';
     case 'REM':
-      return 'Removed (Rot gestrichelt)';
+      return 'REM (Removed / Principle Variation)';
   }
 }
 
-export function deriveVariationTypeFromStatus(code: StatusCode): string {
+export function derivePlanningCategoryFromStatus(code: StatusCode): string {
   switch (code) {
     case 'BASE':
-      return 'Referenz (Gen. n-1)';
+      return 'Referenzsystem G_0 (Grau)';
     case 'CV':
-      return 'ÜV (Übernahmevariation)';
+      return 'Carryover Variation (Blau)';
     case 'NEW':
-      return 'PV (Neu / Extern)';
-    case 'EC-GV':
-    case 'UD-GV':
-      return 'GV (Gestaltvariation)';
+      return 'Newly added / PV (Violett)';
+    case 'EC-AV':
     case 'EC-PV':
+      return 'Engineering change (Orange)';
+    case 'UD-AV':
     case 'UD-PV':
-      return 'PV (Prinzipvariation)';
+      return 'Unplanned deviation (Gelb)';
     case 'REM':
-      return 'PV- (Entfall / Entfernt)';
+      return 'Removed / Entfall (Rot gestrichelt)';
   }
+}
+
+export function deriveVariationTypeFromStatus(
+  code: StatusCode,
+  lang: NomenclatureLang = 'en'
+): string {
+  if (code === 'BASE') return 'Referenzsystem (G_0)';
+  if (code === 'NEW') {
+    return lang === 'de' ? 'PV (Prinzipvariation · Neu)' : 'PV (Principle Variation · New)';
+  }
+  return getVariationFullName(statusCodeToVariationKind(code), lang);
 }
 
 export function getSwatchForStatus(
@@ -186,38 +290,19 @@ export function getSwatchForStatus(
   lifecycle?: string
 ): PaletteSwatch {
   if (!code) {
-    return {
-      bg: '#F8FAFC',
-      border: '#CBD5E1',
-      text: '#64748B',
-    };
+    return { bg: '#F8FAFC', border: '#CBD5E1', text: '#64748B' };
   }
 
   if (mode === 'planning') {
-    const group = statusCodeToColorGroup(code);
-    return palette[group];
+    return palette[statusCodeToColorGroup(code)];
   }
 
   if (mode === 'variation') {
-    if (code === 'BASE') {
-      return { bg: '#E2E8F0', border: '#64748B', text: '#1E293B' };
-    }
-    if (code === 'CV') {
-      return { bg: '#DBEAFE', border: '#2563EB', text: '#1E3A8A' };
-    }
-    if (code === 'EC-GV' || code === 'UD-GV') {
-      // Gestaltvariation (GV): Warm Amber / Sky-Indigo contrast
-      return { bg: '#E0F2FE', border: '#0284C7', text: '#0C4A6E' };
-    }
-    if (code === 'EC-PV' || code === 'UD-PV') {
-      // Prinzipvariation (PV): Deep Magenta / Rose-Violet
-      return { bg: '#FCE7F3', border: '#DB2777', text: '#831843' };
-    }
-    if (code === 'NEW') {
-      return { bg: '#F3E8FF', border: '#7C3AED', text: '#4C1D95' };
-    }
-    // REM (PV-)
-    return { bg: '#FECACA', border: '#DC2626', text: '#7F1D1D', dashed: true };
+    if (code === 'BASE') return VARIATION_MARKER_COLORS.BASE;
+    if (code === 'CV') return VARIATION_MARKER_COLORS.CV;
+    if (code === 'EC-AV' || code === 'UD-AV') return VARIATION_MARKER_COLORS.AV;
+    if (code === 'EC-PV' || code === 'UD-PV' || code === 'NEW') return VARIATION_MARKER_COLORS.PV;
+    return { ...VARIATION_MARKER_COLORS.REM, dashed: true };
   }
 
   // lifecycle mode
@@ -231,22 +316,25 @@ export function getSwatchForStatus(
   return { bg: '#DCFCE7', border: '#16A34A', text: '#14532D' };
 }
 
-export function getVariationShortLabel(code: StatusCode | ''): string {
+export function getVariationShortLabel(
+  code: StatusCode | '',
+  lang: NomenclatureLang = 'en'
+): string {
   switch (code) {
     case 'BASE':
-      return 'Ref.';
+      return 'G₀';
     case 'CV':
-      return 'ÜV';
+      return lang === 'de' ? 'ÜV' : 'CV';
     case 'NEW':
-      return 'PV (Neu)';
-    case 'EC-GV':
-    case 'UD-GV':
-      return 'GV';
+      return 'PV+';
+    case 'EC-AV':
+    case 'UD-AV':
+      return 'AV';
     case 'EC-PV':
     case 'UD-PV':
       return 'PV';
     case 'REM':
-      return 'PV−';
+      return lang === 'de' ? 'Entfall' : 'REM';
     default:
       return '—';
   }
@@ -268,7 +356,6 @@ export function formatLaneCodeAndLabel(raw: string): { code: string; label: stri
   return { code: '', label: raw.replace(/_/g, ' ') };
 }
 
-/** Better German display labels for the 9 canonical lanes */
 export const LANE_DISPLAY_NAMES: Record<string, string> = {
   S1_Rahmen_Peripherie: 'Rahmen & Peripherie',
   S2_Band_vorne: 'Band vorne',

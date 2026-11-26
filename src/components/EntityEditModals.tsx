@@ -115,7 +115,12 @@ interface EntityEditModalsProps {
   onUpdateSpur: (spurId: string, patch: Partial<Pick<SpurDashboardRow, 'name' | 'role' | 'maturitySummary'>>) => void;
   onUpdateVersion: (
     versionKey: string,
-    patch: Partial<Pick<PhaseVersionConfig, 'phaseName' | 'milestoneBadge' | 'systemStateSummary'>>
+    patch: Partial<
+      Pick<
+        PhaseVersionConfig,
+        'phaseName' | 'generationId' | 'generationName' | 'engineeringGenId' | 'milestoneLabel' | 'milestoneBadge' | 'systemStateSummary'
+      >
+    >
   ) => void;
 }
 
@@ -477,7 +482,7 @@ const UpsertEventForm: React.FC<
 > = ({ modal, dataset, palette, onUpsertEvent, onDeleteEvent, onClose }) => {
   const existing = modal.existing;
   const [versionKey, setVersionKey] = useState(modal.versionKey);
-  const [statusCode, setStatusCode] = useState<StatusCode>(existing?.statusCode ?? 'EC-GV');
+  const [statusCode, setStatusCode] = useState<StatusCode>(existing?.statusCode ?? 'EC-AV');
   const [stateDescription, setStateDescription] = useState(existing?.stateDescription ?? '');
   const [rationale, setRationale] = useState(existing?.rationale ?? '');
   const [causeIdRaw, setCauseIdRaw] = useState(existing?.causeIdRaw ?? '');
@@ -1286,6 +1291,10 @@ const EditVersionForm: React.FC<
 > = ({ modal, onUpdateVersion, onClose }) => {
   const { version } = modal;
   const [phaseName, setPhaseName] = useState(version.phaseName);
+  const [generationId, setGenerationId] = useState(version.generationId);
+  const [generationName, setGenerationName] = useState(version.generationName);
+  const [engineeringGenId, setEngineeringGenId] = useState(version.engineeringGenId);
+  const [milestoneLabel, setMilestoneLabel] = useState(version.milestoneLabel);
   const [milestoneBadge, setMilestoneBadge] = useState(version.milestoneBadge);
   const [systemStateSummary, setSystemStateSummary] = useState(version.systemStateSummary);
 
@@ -1293,33 +1302,89 @@ const EditVersionForm: React.FC<
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        onUpdateVersion(version.versionKey, { phaseName, milestoneBadge, systemStateSummary });
+        onUpdateVersion(version.versionKey, {
+          phaseName,
+          generationId,
+          generationName,
+          engineeringGenId,
+          milestoneLabel,
+          milestoneBadge,
+          systemStateSummary,
+        });
         onClose();
       }}
       className="flex flex-col overflow-hidden"
     >
-      <ModalHeader title={`System-Version ${version.versionKey} bearbeiten`} onClose={onClose} />
+      <ModalHeader title={`Generation / Version ${version.versionKey} bearbeiten`} onClose={onClose} />
       <div className="space-y-3 overflow-y-auto p-5 text-xs">
-        <div>
-          <label className="font-semibold text-slate-600 dark:text-slate-300">Phasen_Name</label>
-          <input
-            required
-            type="text"
-            value={phaseName}
-            onChange={(e) => setPhaseName(e.target.value)}
-            className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 dark:border-slate-700 dark:bg-slate-800"
-          />
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="font-semibold text-slate-600 dark:text-slate-300">
+              Generation_ID (z. B. G_0 .. G_3)
+            </label>
+            <input
+              type="text"
+              value={generationId}
+              onChange={(e) => setGenerationId(e.target.value)}
+              className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono dark:border-slate-700 dark:bg-slate-800"
+            />
+          </div>
+          <div>
+            <label className="font-semibold text-slate-600 dark:text-slate-300">
+              Engineering_Gen_ID (z. B. E_{'{3,2}'})
+            </label>
+            <input
+              type="text"
+              value={engineeringGenId}
+              onChange={(e) => setEngineeringGenId(e.target.value)}
+              className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono dark:border-slate-700 dark:bg-slate-800"
+            />
+          </div>
         </div>
-        <div>
-          <label className="font-semibold text-slate-600 dark:text-slate-300">
-            Meilenstein_Badge (z. B. M1: Entenrennen oder leer)
-          </label>
-          <input
-            type="text"
-            value={milestoneBadge}
-            onChange={(e) => setMilestoneBadge(e.target.value)}
-            className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 dark:border-slate-700 dark:bg-slate-800"
-          />
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="font-semibold text-slate-600 dark:text-slate-300">Generation_Name</label>
+            <input
+              type="text"
+              value={generationName}
+              onChange={(e) => setGenerationName(e.target.value)}
+              className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 dark:border-slate-700 dark:bg-slate-800"
+            />
+          </div>
+          <div>
+            <label className="font-semibold text-slate-600 dark:text-slate-300">Phasen_Name</label>
+            <input
+              required
+              type="text"
+              value={phaseName}
+              onChange={(e) => setPhaseName(e.target.value)}
+              className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 dark:border-slate-700 dark:bg-slate-800"
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="font-semibold text-slate-600 dark:text-slate-300">
+              Meilenstein_Label (z. B. ME G_1)
+            </label>
+            <input
+              type="text"
+              value={milestoneLabel}
+              onChange={(e) => setMilestoneLabel(e.target.value)}
+              className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono dark:border-slate-700 dark:bg-slate-800"
+            />
+          </div>
+          <div>
+            <label className="font-semibold text-slate-600 dark:text-slate-300">
+              Meilenstein_Badge
+            </label>
+            <input
+              type="text"
+              value={milestoneBadge}
+              onChange={(e) => setMilestoneBadge(e.target.value)}
+              className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 dark:border-slate-700 dark:bg-slate-800"
+            />
+          </div>
         </div>
         <div>
           <label className="font-semibold text-slate-600 dark:text-slate-300">
